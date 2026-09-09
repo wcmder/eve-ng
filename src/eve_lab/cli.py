@@ -1,0 +1,68 @@
+"""Command-line entry point for local plans and server discovery."""
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from urllib.parse import quote
+
+import yaml
+
+from .client import EveClient
+from .config import load_server
+from .deploy import apply, delete, lab_status, lifecycle, plan
+from .topology import load_topology
+
+
+def main():
+    parser = argparse.ArgumentParser(description="EVE-NG lab tooling")
+    parser.add_argument("--root", type=Path, default=Path.cwd(), help="Repository root")
+    commands = parser.add_subparsers(dest="command", required=True)
+    for name in ("plan", "status", "templates", "template", "apply", "start", "stop", "delete"):
+        command = commands.add_parser(name)
+        command.add_argument("--server", default="default")
+        if name in ("plan", "apply", "start", "stop", "delete"):
+            command.add_argument("lab")
+        if name == "delete":
+            command.description = "Stop all remote nodes and permanently delete the entire remote lab. Local files are kept."
+        if name == "status":
+            command.add_argument("lab", nargs="?", help="Omit for server status")
+        if name == "template":
+            command.add_argument("name")
+    args = parser.parse_args()
+    try:
+        server = load_server(args.root, args.server)
+        topology = load_topology(args.root, args.lab) if getattr(args, "lab", None) else None
+        if args.command == "plan":
+            result = plan(topology, server)
+        else:
+            client = EveClient(server["url"], server.get("timeout", 15))
+            client.login(server["username"], server["password"])
+            try:
+                if args.command == "apply":
+                    result = apply(client, topology)
+                elif args.command == "delete":
+                    result = delete(client, topology)
+                elif args.command in ("start", "stop"):
+                    result = lifecycle(client, topology, args.command)
+                elif args.command == "status" and topology:
+                    result = lab_status(client, topology)
+                else:
+                    path = {
+                        "status": "status",
+                        "templates": "list/templates/",
+                        "template": "list/templates/" + quote(getattr(args, "name", ""), safe=""),
+                    }[args.command]
+                    result = client.request("GET", path)
+            finally:
+                try:
+                    client.logout()
+                except RuntimeError as error:
+                    print(f"Logout warning: {error}", file=sys.stderr)
+        print(json.dumps(result, indent=2))
+    except (OSError, ValueError, RuntimeError, yaml.YAMLError) as error:
+        parser.exit(1, f"Error: {error}\n")
+
+
+if __name__ == "__main__":
+    main()

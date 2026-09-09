@@ -1,0 +1,19 @@
+name: palo-lab
+description: Initial C8000V uplink for the Palo Alto lab
+remote_folder: /
+nodes:
+  - name: R1
+    template: c8000v
+    type: qemu
+    image: c8000v-17.15.06
+    cpu: 4
+    ethernet: 4
+
+networks:
+  - name: mgmt
+    type: pnet1
+
+links:
+  - node: R1
+    interface: GigabitEthernet1
+    network: mgmt

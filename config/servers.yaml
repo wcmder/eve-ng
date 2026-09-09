@@ -1,0 +1,6 @@
+servers:
+  default:
+    url: http://10.0.4.4
+    username_env: EVE_USERNAME
+    password_env: EVE_PASSWORD
+    timeout: 120
