@@ -1,9 +1,25 @@
 """Additive EVE-NG deployment and lab lifecycle operations."""
 
 from urllib.parse import quote
+import time
 
 from .client import EveAPIError
-from .topology import interface_key, validate
+from .topology import expand_links, interface_key, validate
+
+STOP_TIMEOUT = 30
+
+
+def wait_for_stopped(client, path):
+    """EVE-NG may acknowledge stop before the VM process has exited."""
+    deadline = time.monotonic() + STOP_TIMEOUT
+    while True:
+        nodes = indexed(client.request("GET", path + "/nodes"))
+        if all(str(node.get("status")) == "0" for node in nodes.values()):
+            return nodes
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return nodes
+        time.sleep(min(1, remaining))
 
 
 def lab_path(topology):
@@ -75,8 +91,67 @@ def check_link(client, path, link, nodes, networks):
     return ident, current
 
 
-def apply(client, topology):
+def check_direct_bridges(client, path, direct, nodes, networks):
+    """Never hide a shared LAN when converting a visible bridge to a cable."""
+    for name, attachments in direct:
+        if name not in networks:
+            continue
+        expected = set()
+        for link in attachments:
+            if link["node"] in nodes:
+                node = nodes[link["node"]]
+                ident, _ = resolve(interfaces(client, path, node), link["interface"])
+                expected.add((node["id"], ident))
+        actual = set()
+        for node in nodes.values():
+            for ident, port in interfaces(client, path, node).items():
+                if str(port.get("network_id")) == networks[name]["id"]:
+                    actual.add((node["id"], ident))
+        if actual - expected:
+            raise RuntimeError(f"Direct link {name} has other attached interfaces; cannot hide a shared network")
+
+
+def prune_objects(client, path, topology, changes):
+    """Remove undeclared objects only after the desired topology was applied."""
+    nodes = named(client, path + "/nodes")
+    networks = named(client, path + "/networks")
+    keep_nodes = {node["name"] for node in topology["nodes"]}
+    keep_networks = {network["name"] for network in topology["networks"]}
+    if any(str(node.get("status")) != "0" for node in nodes.values()):
+        raise RuntimeError("Stop all nodes in the lab before pruning")
+    for name, node in nodes.items():
+        if name not in keep_nodes:
+            client.request("DELETE", f"{path}/nodes/{node['id']}")
+            changes.append(f"pruned node: {name}")
+            if name in named(client, path + "/nodes"):
+                raise RuntimeError(f"Server did not delete node {name}")
+    nodes = named(client, path + "/nodes")
+    # Node deletion may also remove now-unused hidden networks.
+    networks = named(client, path + "/networks")
+    for name, network in networks.items():
+        if name in keep_networks:
+            continue
+        attached = []
+        for node in nodes.values():
+            for ident, port in interfaces(client, path, node).items():
+                if str(port.get("network_id")) == network["id"]:
+                    attached.append((node, ident, port["name"]))
+        # EVE-NG deleteNetwork() unlinks attached interfaces before saving.
+        # PUT to network 0 is invalid; interface DELETE is version-dependent.
+        if name in named(client, path + "/networks"):
+            client.request("DELETE", f"{path}/networks/{network['id']}")
+        changes.append(f"pruned network: {name}")
+        if name in named(client, path + "/networks"):
+            raise RuntimeError(f"Server did not delete network {name}")
+        for node, ident, port_name in attached:
+            if str(interfaces(client, path, node)[ident].get("network_id")) != "0":
+                raise RuntimeError(f"Server did not disconnect {node['name']} {port_name}")
+            changes.append(f"disconnected {node['name']} {port_name} from {name}")
+
+
+def apply(client, topology, prune=False):
     validate(topology)
+    topology, direct = expand_links(topology)
     path = lab_path(topology)
     # Preflight templates/images and network types before creating anything.
     payloads = {}
@@ -108,10 +183,22 @@ def apply(client, topology):
         exists = False
     nodes = named(client, path + "/nodes") if exists else {}
     networks = named(client, path + "/networks") if exists else {}
+    if prune and any(str(node.get("status")) != "0" for node in nodes.values()):
+        raise RuntimeError("Stop all nodes in the lab before pruning: eve stop <lab>")
+    check_direct_bridges(client, path, direct, nodes, networks)
+    updates = []
     for kind, existing in (("nodes", nodes), ("networks", networks)):
         for desired in topology[kind]:
             if desired["name"] in existing:
-                check_settings(desired, existing[desired["name"]])
+                actual = existing[desired["name"]]
+                resources = {key: desired[key] for key in ("cpu", "ram")
+                             if kind == "nodes" and key in desired
+                             and str(desired[key]) != str(actual.get(key))}
+                check_settings({key: value for key, value in desired.items() if key not in resources}, actual)
+                if resources:
+                    if str(actual.get("status")) != "0":
+                        raise RuntimeError(f"Stop {desired['name']} before changing CPU or RAM")
+                    updates.append((desired, actual["id"], resources))
     for link in topology["links"]:
         if link["node"] in nodes:
             check_link(client, path, link, nodes, networks)
@@ -123,11 +210,23 @@ def apply(client, topology):
                 "author": "eve", "description": topology.get("description", ""), "body": "",
             })
             changes.append("created lab")
+        for desired, ident, resources in updates:
+            # Check again immediately before the write in case the node was started.
+            current = named(client, path + "/nodes")[desired["name"]]
+            if current["id"] != ident or str(current.get("status")) != "0":
+                raise RuntimeError(f"Node {desired['name']} changed or started during apply; retry after stopping it")
+            # EVE-NG's edit() changes CPU/RAM without setting its modified flag.
+            # Sending the unchanged name triggers persistence without a rename.
+            client.request("PUT", f"{path}/nodes/{ident}", {"name": current["name"], **resources})
+            changes.append(f"updated {desired['name']}: {resources}")
+            nodes = named(client, path + "/nodes")
+            check_settings(desired, nodes[desired["name"]])
         for kind, existing in (("networks", networks), ("nodes", nodes)):
             for desired in topology[kind]:
                 name = desired["name"]
                 if name not in existing:
-                    payload = payloads[name] if kind == "nodes" else desired
+                    # Hidden bridges with no links are discarded on save by EVE-NG.
+                    payload = payloads[name] if kind == "nodes" else {"visibility": 1, **desired}
                     client.request("POST", path + "/" + kind, payload)
                     changes.append(f"created {kind}: {name}")
                     existing.update(named(client, path + "/" + kind))
@@ -150,6 +249,17 @@ def apply(client, topology):
             _, port = resolve(interfaces(client, path, node), link["interface"])
             if str(port.get("network_id")) != target:
                 raise RuntimeError("Server did not persist the requested connection")
+        check_direct_bridges(client, path, direct, nodes, networks)
+        for name, _ in direct:
+            network = networks[name]
+            if str(network.get("visibility", 1)) != "0":
+                client.request("PUT", f"{path}/networks/{network['id']}", {"visibility": 0})
+                changes.append(f"hid direct-link bridge: {name}")
+                updated = named(client, path + "/networks")
+                if name not in updated or str(updated[name].get("visibility")) != "0":
+                    raise RuntimeError(f"Server did not hide direct-link bridge {name}")
+        if prune:
+            prune_objects(client, path, topology, changes)
     except (RuntimeError, ValueError) as error:
         raise RuntimeError(
             f"Apply did not complete: {error}. Completed: {changes}. "
@@ -162,6 +272,8 @@ def apply(client, topology):
 def lifecycle(client, topology, action):
     if action not in ("start", "stop"):
         raise ValueError(f"Unsupported action: {action}")
+    if action == "stop":
+        return stop_all(client, topology)
     path = lab_path(topology)
     nodes = named(client, path + "/nodes")
     missing = [node["name"] for node in topology["nodes"] if node["name"] not in nodes]
@@ -178,6 +290,33 @@ def lifecycle(client, topology, action):
     except RuntimeError as error:
         raise RuntimeError(f"{action} failed: {error}; completed nodes: {completed}") from error
     return {"lab": topology["name"], "action": action, "changed_nodes": completed}
+
+
+def stop_all(client, topology):
+    path = lab_path(topology)
+    nodes = indexed(client.request("GET", path + "/nodes"))
+    requested, completed, failures = {}, [], []
+    for ident, node in nodes.items():
+        if str(node.get("status")) == "0":
+            continue
+        try:
+            client.request("GET", f"{path}/nodes/{ident}/stop")
+            requested[ident] = node["name"]
+        except RuntimeError as error:
+            failures.append(f"{node['name']} (ID {ident}): {error}")
+    try:
+        remaining = wait_for_stopped(client, path)
+        completed = [name for ident, name in requested.items()
+                     if ident in remaining and str(remaining[ident].get("status")) == "0"]
+        active = [f"{node['name']} (ID {ident})" for ident, node in remaining.items()
+                  if str(node.get("status")) != "0"]
+        if active:
+            failures.append(f"Nodes still active after {STOP_TIMEOUT}s: {active}")
+    except RuntimeError as error:
+        failures.append(f"Could not verify stopped state: {error}")
+    if failures:
+        raise RuntimeError(f"Stop incomplete: {'; '.join(failures)}. Completed nodes: {completed}. Stop requests accepted: {list(requested.values())}")
+    return {"lab": topology["name"], "action": "stop", "changed_nodes": completed}
 
 
 def lab_status(client, topology):
@@ -202,7 +341,7 @@ def delete(client, topology):
             if str(node.get("status")) != "0":
                 client.request("GET", f"{path}/nodes/{ident}/stop")
                 result["stopped_nodes"].append(node["name"])
-        remaining = indexed(client.request("GET", path + "/nodes"))
+        remaining = wait_for_stopped(client, path)
         if any(str(node.get("status")) != "0" for node in remaining.values()):
             raise RuntimeError("Some nodes are still active; lab was not deleted")
         client.request("DELETE", path)

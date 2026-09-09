@@ -1,5 +1,5 @@
 name: palo-lab
-description: Initial C8000V uplink for the Palo Alto lab
+description: Palo Alto firewall lab with Panorama
 remote_folder: /
 nodes:
   - name: R1
@@ -7,6 +7,14 @@ nodes:
     type: qemu
     image: c8000v-17.15.06
     cpu: 4
+    ethernet: 4
+    ram: 8192
+  - name: PA1
+    template: paloalto
+    type: qemu
+    image: paloalto-11.2.10-h6
+    cpu: 2
+    ram: 8192
     ethernet: 4
 
 networks:
@@ -17,3 +25,13 @@ links:
   - node: R1
     interface: GigabitEthernet1
     network: mgmt
+  - node: PA1
+    interface: mgmt
+    network: mgmt
+  - name: r1-pa1
+    from:
+      node: R1
+      interface: GigabitEthernet2
+    to:
+      node: PA1
+      interface: eth1/1

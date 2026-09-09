@@ -11,7 +11,7 @@ import yaml
 from .client import EveClient
 from .config import load_server
 from .deploy import apply, delete, lab_status, lifecycle, plan
-from .topology import load_topology
+from .topology import load_lab_target, load_topology
 
 
 def main():
@@ -25,6 +25,11 @@ def main():
             command.add_argument("lab")
         if name == "delete":
             command.description = "Stop all remote nodes and permanently delete the entire remote lab. Local files are kept."
+        if name == "apply":
+            command.add_argument("--prune", action="store_true", help="Delete remote nodes/networks absent from YAML; requires stopped nodes")
+        if name == "stop":
+            command.description = "Stop every node in the remote lab, regardless of local node/link edits."
+            command.add_argument("--remote-folder", help="Remote folder; bypass reading topology.yaml (use / for root)")
         if name == "status":
             command.add_argument("lab", nargs="?", help="Omit for server status")
         if name == "template":
@@ -32,7 +37,10 @@ def main():
     args = parser.parse_args()
     try:
         server = load_server(args.root, args.server)
-        topology = load_topology(args.root, args.lab) if getattr(args, "lab", None) else None
+        if args.command == "stop":
+            topology = load_lab_target(args.root, args.lab, args.remote_folder)
+        else:
+            topology = load_topology(args.root, args.lab) if getattr(args, "lab", None) else None
         if args.command == "plan":
             result = plan(topology, server)
         else:
@@ -40,7 +48,7 @@ def main():
             client.login(server["username"], server["password"])
             try:
                 if args.command == "apply":
-                    result = apply(client, topology)
+                    result = apply(client, topology, prune=args.prune)
                 elif args.command == "delete":
                     result = delete(client, topology)
                 elif args.command in ("start", "stop"):

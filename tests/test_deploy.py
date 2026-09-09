@@ -2,12 +2,13 @@ import copy
 import io
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from urllib.error import HTTPError
 
 from eve_lab.client import EveAPIError, EveClient
 from eve_lab.deploy import apply, delete, lab_path, lifecycle
-from eve_lab.topology import load_topology, validate
+from eve_lab.topology import expand_links, load_lab_target, validate
 
 
 class FakeEve:
@@ -54,6 +55,8 @@ class FakeEve:
                     raise EveAPIError("Missing node count", 500)
                 if kind == "nodes" and not {"left", "top"} <= payload.keys():
                     raise EveAPIError("Undefined array key: node position", 500)
+                if kind == "networks" and payload["type"] == "bridge" and not payload.get("visibility"):
+                    return None  # EVE-NG omits unused hidden bridges when saving.
                 ident = str(len(objects) + 1)
                 objects[ident] = {**payload, "id": int(ident)}
                 if kind == "nodes":
@@ -61,15 +64,40 @@ class FakeEve:
                     # Deliberately nonzero/noncontiguous ID: never guess from Gi1.
                     self.ports[ident] = {"7": {"name": "Gi1", "network_id": 0}}
                 return None
+        if method == "DELETE" and "/networks/" in path:
+            ident = path.split("/networks/")[1]
+            del self.networks[ident]
+            for ports in self.ports.values():
+                for port in ports.values():
+                    if str(port["network_id"]) == ident:
+                        port["network_id"] = 0
+            return None
+        if method == "DELETE" and "/nodes/" in path and not path.endswith("/interfaces"):
+            ident = path.split("/nodes/")[1]
+            del self.nodes[ident]
+            del self.ports[ident]
+            return None
+        if method == "PUT" and "/networks/" in path:
+            self.networks[path.split("/networks/")[1]].update(payload)
+            return None
         if "/nodes/" in path:
+            if method == "PUT" and "/" not in path.split("/nodes/")[1]:
+                if "name" not in payload:
+                    raise EveAPIError("Cannot edit node: Node has not been modified (40016)", 400)
+                self.nodes[path.split("/nodes/")[1]].update(payload)
+                return None
             ident, action = path.split("/nodes/")[1].split("/")
             if action == "interfaces":
                 if method == "GET":
                     ports = copy.deepcopy(self.ports[ident])
                     return {"ethernet": list(ports.values()) if self.list_ports else ports}
+                if method == "DELETE":
+                    raise EveAPIError("Request not valid (60027)", 400)
                 if self.fail_link:
                     raise EveAPIError("connection failed", 500)
                 for port, target in payload.items():
+                    if str(target) == "0":
+                        raise EveAPIError("Cannot link node, invalid network_id (20033)", 400)
                     self.ports[ident][port]["network_id"] = int(target)
                 return None
             if action in ("start", "stop"):
@@ -80,7 +108,14 @@ class FakeEve:
 
 class DeploymentTests(unittest.TestCase):
     def setUp(self):
-        self.topology = load_topology(Path(__file__).resolve().parents[1], "palo-lab")
+        # Keep deployment tests independent of the user's evolving lab files.
+        self.topology = {
+            "name": "palo-lab", "remote_folder": "/",
+            "nodes": [{"name": "R1", "template": "c8000v", "type": "qemu",
+                       "image": "c8000v-17.15.06", "cpu": 4, "ethernet": 4}],
+            "networks": [{"name": "mgmt", "type": "pnet1"}],
+            "links": [{"node": "R1", "interface": "GigabitEthernet1", "network": "mgmt"}],
+        }
         self.client = FakeEve()
 
     def test_create_and_rerun_without_duplicates(self):
@@ -103,6 +138,101 @@ class DeploymentTests(unittest.TestCase):
         apply(self.client, self.topology)
         self.assertEqual(self.client.nodes["1"]["left"], 350)
         self.assertEqual(self.client.nodes["1"]["top"], 450)
+
+    def test_unconnected_bridge_persists_and_is_reused(self):
+        self.topology["networks"].append({"name": "internal", "type": "bridge"})
+        apply(self.client, self.topology)
+        self.assertEqual(self.client.networks["2"]["name"], "internal")
+        self.assertEqual(self.client.networks["2"]["visibility"], 1)
+        self.assertEqual(apply(self.client, self.topology)["changes"], [])
+
+    def test_prune_removes_orphans_and_disconnects_retained_node(self):
+        apply(self.client, self.topology)
+        self.topology["nodes"].append({**self.topology["nodes"][0], "name": "extra"})
+        apply(self.client, self.topology)
+        self.topology["nodes"].pop()
+        self.topology["networks"] = []
+        self.topology["links"] = []
+        self.assertEqual(apply(self.client, self.topology)["changes"], [])
+        apply(self.client, self.topology, prune=True)
+        self.assertEqual(list(self.client.nodes), ["1"])
+        self.assertEqual(self.client.networks, {})
+        self.assertEqual(self.client.ports["1"]["7"]["network_id"], 0)
+        self.assertTrue(self.client.exists)
+        self.assertEqual(apply(self.client, self.topology, prune=True)["changes"], [])
+
+    def test_prune_preserves_direct_link_bridge(self):
+        topology = self.direct_topology()
+        apply(self.client, topology)
+        self.assertEqual(apply(self.client, topology, prune=True)["changes"], [])
+        self.assertEqual(self.client.networks["1"]["visibility"], 0)
+
+    def test_prune_running_node_rejected_before_writes(self):
+        apply(self.client, self.topology)
+        self.client.nodes["1"]["status"] = 2
+        self.client.writes.clear()
+        with self.assertRaisesRegex(RuntimeError, "Stop all nodes"):
+            apply(self.client, self.topology, prune=True)
+        self.assertEqual(self.client.writes, [])
+
+    def test_prune_verifies_deletion(self):
+        apply(self.client, self.topology)
+        self.topology["networks"] = []
+        self.topology["links"] = []
+        original = self.client.request
+        def request(method, path, payload=None):
+            if method == "DELETE" and "/networks/" in path:
+                return None
+            return original(method, path, payload)
+        self.client.request = request
+        with self.assertRaisesRegex(RuntimeError, "Server did not delete network"):
+            apply(self.client, self.topology, prune=True)
+
+    def direct_topology(self):
+        self.topology["nodes"].append({**self.topology["nodes"][0], "name": "R2"})
+        self.topology["networks"] = []
+        self.topology["links"] = [{"name": "cable", "from": {"node": "R1", "interface": "Gi1"},
+                                   "to": {"node": "R2", "interface": "GigabitEthernet1"}}]
+        return self.topology
+
+    def test_direct_link_create_hide_and_repeat(self):
+        topology = self.direct_topology()
+        apply(self.client, topology)
+        self.assertEqual(self.client.networks["1"]["visibility"], 0)
+        self.assertEqual(self.client.ports["1"]["7"]["network_id"], 1)
+        self.assertEqual(self.client.ports["2"]["7"]["network_id"], 1)
+        self.assertEqual(apply(self.client, topology)["changes"], [])
+
+    def test_direct_link_reuses_visible_bridge_without_rewiring(self):
+        topology = self.direct_topology()
+        expanded, _ = expand_links(topology)
+        apply(self.client, expanded)
+        self.client.writes.clear()
+        apply(self.client, topology)
+        self.assertEqual(self.client.writes, [("PUT", "labs/palo-lab.unl/networks/1", {"visibility": 0})])
+
+    def test_direct_link_rejects_shared_bridge(self):
+        topology = self.direct_topology()
+        expanded, _ = expand_links(topology)
+        apply(self.client, expanded)
+        self.client.nodes["3"] = {"name": "extra", "status": 0}
+        self.client.ports["3"] = {"0": {"name": "eth0", "network_id": 1}}
+        self.client.writes.clear()
+        with self.assertRaisesRegex(RuntimeError, "other attached"):
+            apply(self.client, topology)
+        self.assertEqual(self.client.writes, [])
+
+    def test_direct_link_validation_and_stable_name(self):
+        topology = self.direct_topology()
+        del topology["links"][0]["name"]
+        first, _ = expand_links(topology)
+        link = topology["links"][0]
+        link["from"], link["to"] = link["to"], link["from"]
+        second, _ = expand_links(topology)
+        self.assertEqual(first["networks"], second["networks"])
+        topology["links"].append(copy.deepcopy(link))
+        with self.assertRaises(ValueError):
+            validate(topology)
 
     def test_delete_stops_all_remote_nodes_and_is_repeatable(self):
         apply(self.client, self.topology)
@@ -156,11 +286,43 @@ class DeploymentTests(unittest.TestCase):
 
     def test_drift_prevents_all_writes(self):
         apply(self.client, self.topology)
-        self.client.nodes["1"]["cpu"] = 2
+        self.client.nodes["1"]["ethernet"] = 2
         self.client.writes.clear()
-        with self.assertRaisesRegex(RuntimeError, "Conflict on R1.cpu"):
+        with self.assertRaisesRegex(RuntimeError, "Conflict on R1.ethernet"):
             apply(self.client, self.topology)
         self.assertEqual(self.client.writes, [])
+
+    def test_apply_updates_stopped_resources_and_rerun_is_noop(self):
+        apply(self.client, self.topology)
+        self.topology["nodes"][0].update(ram=4096, cpu=2)
+        self.client.writes.clear()
+        apply(self.client, self.topology)
+        self.assertEqual(self.client.writes, [("PUT", "labs/palo-lab.unl/nodes/1", {"name": "R1", "cpu": 2, "ram": 4096})])
+        self.assertEqual(self.client.nodes["1"]["status"], 0)
+        self.client.writes.clear()
+        self.assertEqual(apply(self.client, self.topology)["changes"], [])
+        self.assertEqual(self.client.writes, [])
+
+    def test_running_resource_update_rejected_before_writes(self):
+        apply(self.client, self.topology)
+        self.client.nodes["1"]["status"] = 2
+        self.topology["nodes"][0]["ram"] = 4096
+        self.client.writes.clear()
+        with self.assertRaisesRegex(RuntimeError, "Stop R1"):
+            apply(self.client, self.topology)
+        self.assertEqual(self.client.writes, [])
+
+    def test_resource_update_must_persist(self):
+        apply(self.client, self.topology)
+        self.topology["nodes"][0]["ram"] = 4096
+        original = self.client.request
+        def request(method, path, payload=None):
+            if method == "PUT" and path.endswith("/nodes/1"):
+                return None
+            return original(method, path, payload)
+        self.client.request = request
+        with self.assertRaisesRegex(RuntimeError, "Conflict on R1.ram"):
+            apply(self.client, self.topology)
 
     def test_link_conflict_does_not_rewire(self):
         apply(self.client, self.topology)
@@ -202,6 +364,83 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(lifecycle(self.client, self.topology, "start")["changed_nodes"], [])
         self.assertEqual(self.client.nodes["2"]["status"], 0)
         self.assertEqual(lifecycle(self.client, self.topology, "stop")["changed_nodes"], ["R1"])
+
+    def test_stop_uses_remote_ids_despite_invalid_local_nodes(self):
+        apply(self.client, self.topology)
+        self.client.nodes["1"]["status"] = 2
+        self.client.nodes["2"] = {"name": "R1", "status": 2}
+        self.topology["nodes"] = [{"name": "not-deployed", "ram": -1}]
+        result = lifecycle(self.client, self.topology, "stop")
+        self.assertEqual(result["changed_nodes"], ["R1", "R1"])
+        self.assertTrue(all(node["status"] == 0 for node in self.client.nodes.values()))
+        self.assertEqual(lifecycle(self.client, self.topology, "stop")["changed_nodes"], [])
+
+    @patch("eve_lab.deploy.STOP_TIMEOUT", 0)
+    def test_stop_continues_after_one_node_fails(self):
+        apply(self.client, self.topology)
+        self.client.nodes["1"]["status"] = 2
+        self.client.nodes["2"] = {"name": "PA1", "status": 2}
+        original = self.client.request
+        def request(method, path, payload=None):
+            if path.endswith("/nodes/1/stop"):
+                raise EveAPIError("stop failed", 500)
+            return original(method, path, payload)
+        self.client.request = request
+        with self.assertRaisesRegex(RuntimeError, "Completed nodes:.*PA1"):
+            lifecycle(self.client, self.topology, "stop")
+        self.assertEqual(self.client.nodes["2"]["status"], 0)
+
+    @patch("eve_lab.deploy.STOP_TIMEOUT", 0)
+    def test_stop_detects_server_did_not_stop_node(self):
+        apply(self.client, self.topology)
+        self.client.nodes["1"]["status"] = 2
+        original = self.client.request
+        def request(method, path, payload=None):
+            if path.endswith("/stop"):
+                return None
+            return original(method, path, payload)
+        self.client.request = request
+        with self.assertRaisesRegex(RuntimeError, "still active") as caught:
+            lifecycle(self.client, self.topology, "stop")
+        self.assertIn("Completed nodes: []", str(caught.exception))
+        self.assertIn("Stop requests accepted: ['R1']", str(caught.exception))
+
+    def test_stop_and_delete_wait_for_async_shutdown(self):
+        for operation in ("stop", "delete"):
+            with self.subTest(operation=operation):
+                client = FakeEve()
+                apply(client, self.topology)
+                client.nodes["1"]["status"] = 2
+                original = client.request
+                def request(method, path, payload=None):
+                    if path.endswith("/stop"):
+                        return None  # Accepted; VM remains active until the next poll.
+                    return original(method, path, payload)
+                client.request = request
+                def finish_shutdown(_):
+                    client.nodes["1"]["status"] = 0
+                with patch("eve_lab.deploy.time.sleep", side_effect=finish_shutdown) as sleep:
+                    result = (delete(client, self.topology) if operation == "delete"
+                              else lifecycle(client, self.topology, "stop"))
+                sleep.assert_called_once()
+                if operation == "stop":
+                    self.assertEqual(result["changed_nodes"], ["R1"])
+                else:
+                    self.assertTrue(result["deleted"])
+
+    def test_stop_target_ignores_topology_edits(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            lab = root / "labs" / "palo-lab"
+            lab.mkdir(parents=True)
+            (lab / "topology.yaml").write_text("name: renamed\nremote_folder: /My Labs\nnodes: invalid\nlinks: invalid\n")
+            self.assertEqual(load_lab_target(root, "palo-lab"),
+                             {"name": "palo-lab", "remote_folder": "/My Labs"})
+            (lab / "topology.yaml").write_text("nodes: [")
+            self.assertEqual(load_lab_target(root, "palo-lab", "/")["remote_folder"], "/")
+            with self.assertRaisesRegex(ValueError, "--remote-folder"):
+                load_lab_target(root, "palo-lab")
+            self.assertEqual(load_lab_target(root, "missing-lab", "/")["name"], "missing-lab")
 
     def test_running_node_cannot_be_connected(self):
         apply(self.client, self.topology)
