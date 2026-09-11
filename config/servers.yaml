@@ -4,3 +4,5 @@ servers:
     username_env: EVE_USERNAME
     password_env: EVE_PASSWORD
     timeout: 120
+    ssh_username_env: EVE_SSH_USERNAME
+    ssh_password_env: EVE_SSH_PASSWORD

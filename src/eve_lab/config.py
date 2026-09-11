@@ -6,7 +6,7 @@ from pathlib import Path
 import yaml
 
 
-def load_server(root: Path, name: str) -> dict:
+def load_server(root: Path, name: str, auth: str = "web") -> dict:
     """Read simple KEY=value credentials; shell environment takes precedence."""
     env = dict(os.environ)
     env_file = root / ".env"
@@ -23,8 +23,9 @@ def load_server(root: Path, name: str) -> dict:
         server = dict(config["servers"][name])
     except KeyError:
         raise ValueError(f"Unknown server: {name}") from None
-    for field in ("username", "password"):
-        variable = server[f"{field}_env"]
+    fields = ("ssh_username", "ssh_password") if auth == "ssh" else ("username", "password")
+    for field in fields:
+        variable = server.get(f"{field}_env", f"EVE_{field.upper()}")
         if not env.get(variable):
             raise ValueError(f"Set {variable} in the environment or .env")
         server[field] = env[variable]

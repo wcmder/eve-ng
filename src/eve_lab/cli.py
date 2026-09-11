@@ -10,6 +10,7 @@ import yaml
 
 from .client import EveClient
 from .config import load_server
+from .dhcp import clear as clear_dhcp
 from .deploy import apply, delete, lab_status, lifecycle, plan
 from .topology import load_lab_target, load_topology
 
@@ -18,6 +19,12 @@ def main():
     parser = argparse.ArgumentParser(description="EVE-NG lab tooling")
     parser.add_argument("--root", type=Path, default=Path.cwd(), help="Repository root")
     commands = parser.add_subparsers(dest="command", required=True)
+    dhcp = commands.add_parser("dhcp", help="Manage host DHCP leases over SSH")
+    dhcp_commands = dhcp.add_subparsers(dest="dhcp_action", required=True)
+    clear = dhcp_commands.add_parser("clear", help="Back up and clear pnet1 DHCP server leases")
+    clear.add_argument("interface", choices=["pnet1"])
+    clear.add_argument("--server", default="default")
+    clear.add_argument("--dry-run", action="store_true", help="Inspect lease count and configuration without changes")
     for name in ("plan", "status", "templates", "template", "apply", "start", "stop", "delete"):
         command = commands.add_parser(name)
         command.add_argument("--server", default="default")
@@ -36,7 +43,10 @@ def main():
             command.add_argument("name")
     args = parser.parse_args()
     try:
-        server = load_server(args.root, args.server)
+        server = load_server(args.root, args.server, auth="ssh" if args.command == "dhcp" else "web")
+        if args.command == "dhcp":
+            print(json.dumps(clear_dhcp(server, args.interface, args.dry_run), indent=2))
+            return
         if args.command == "stop":
             topology = load_lab_target(args.root, args.lab, args.remote_folder)
         else:

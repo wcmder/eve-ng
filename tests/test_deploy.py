@@ -357,6 +357,56 @@ class DeploymentTests(unittest.TestCase):
             apply(self.client, self.topology)
         self.assertEqual(self.client.writes, [])
 
+    def test_start_retries_network_creation_failure(self):
+        apply(self.client, self.topology)
+        original = self.client.request
+        attempts = []
+        def request(method, path, payload=None):
+            if path.endswith("/start"):
+                attempts.append(path)
+                if len(attempts) == 1:
+                    raise EveAPIError("Failed to create network (11).", 400)
+            return original(method, path, payload)
+        self.client.request = request
+        with patch("eve_lab.deploy.time.sleep"):
+            result = lifecycle(self.client, self.topology, "start")
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(result["changed_nodes"], ["R1"])
+
+    def test_start_retry_is_bounded_and_specific(self):
+        for message, code, count in (("Failed to create network (11).", 400, 3),
+                                     ("Unauthorized", 401, 1),
+                                     ("Image missing", 400, 1)):
+            with self.subTest(message=message):
+                client = FakeEve()
+                apply(client, self.topology)
+                original = client.request
+                attempts = []
+                def request(method, path, payload=None):
+                    if path.endswith("/start"):
+                        attempts.append(path)
+                        raise EveAPIError(message, code)
+                    return original(method, path, payload)
+                client.request = request
+                with patch("eve_lab.deploy.time.sleep"), self.assertRaises(RuntimeError):
+                    lifecycle(client, self.topology, "start")
+                self.assertEqual(len(attempts), count)
+
+    def test_start_does_not_retry_if_already_running_after_error(self):
+        apply(self.client, self.topology)
+        original = self.client.request
+        attempts = []
+        def request(method, path, payload=None):
+            if path.endswith("/start"):
+                attempts.append(path)
+                self.client.nodes["1"]["status"] = 2
+                raise EveAPIError("Failed to create network (11).", 400)
+            return original(method, path, payload)
+        self.client.request = request
+        with patch("eve_lab.deploy.time.sleep"):
+            lifecycle(self.client, self.topology, "start")
+        self.assertEqual(len(attempts), 1)
+
     def test_lifecycle_only_declared_nodes_and_skip_repeats(self):
         apply(self.client, self.topology)
         self.client.nodes["2"] = {"name": "unmanaged", "status": 0}

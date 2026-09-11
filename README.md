@@ -11,7 +11,7 @@ python -m pip install -e .
 ```
 
 The local, gitignored `.env` contains the supplied credentials. For another checkout,
-copy `.env.example` to `.env` and fill in the password. Shell environment variables
+copy `.env.example` to `.env` and fill in the passwords. Shell environment variables
 override `.env`. Server addresses belong in `config/servers.yaml`.
 
 ## Commands
@@ -28,6 +28,7 @@ Run from the repository root with the virtual environment activated:
 | `eve status [lab]` | Read server statistics, or a lab's nodes and networks when a lab is provided. | Yes |
 | `eve templates` | List available device templates. | Yes |
 | `eve template <name>` | Fetch template details, image options, and server defaults. | Yes |
+| `eve dhcp clear pnet1 [--dry-run]` | Back up and clear pnet1 DHCP server leases over SSH. | SSH |
 
 All commands print JSON. Remote commands log in and log out using an in-memory
 session cookie. Discovery, status, and local plan commands do not modify devices.
@@ -131,7 +132,61 @@ absent, the command succeeds without changes. If a node cannot be stopped, delet
 aborts; nodes stopped earlier remain stopped. Failures report partial progress.
 The local topology file must still exist and pass validation.
 
+### Clear pnet1 DHCP leases
+
+```sh
+eve dhcp clear pnet1 --dry-run
+eve dhcp clear pnet1
+```
+
+The dry run checks the host configuration and reports the current lease count.
+Clearing stops `eve-pnet1-dhcp.service`, backs up
+`/var/lib/eve-dhcp/pnet1.leases` beside the original with a timestamp suffix,
+empties the lease file, and restarts the service. Output includes the backup path
+and the number of records before clearing and after restart. Other interfaces'
+lease files are not touched. The service is briefly unavailable during clearing.
+
+This resets server records; it does not send DHCP release requests from clients
+or remove their current IP addresses. Clients can immediately renew leases.
+Stop DHCP clients before clearing and restart them afterward to reacquire leases;
+for clients in this lab, use `eve stop palo-lab` and `eve start palo-lab`.
+Clients in other labs on the same `pnet1` also share this DHCP pool.
+
+The command uses Paramiko locally and Python 3 on EVE-NG. It connects to the
+configured server URL's host; optional `ssh_host` overrides that host. Configure
+both logins separately in the local, gitignored `.env`:
+
+```dotenv
+EVE_USERNAME=admin
+EVE_PASSWORD=eve
+EVE_SSH_USERNAME=root
+EVE_SSH_PASSWORD=eve
+```
+
+These are the current server's credentials. After changing its SSH password,
+update `EVE_SSH_PASSWORD` in `.env`; the next DHCP command uses the new value.
+Shell environment variables override `.env`. Enter values without surrounding
+quotes. `config/servers.yaml` maps `ssh_username_env` and `ssh_password_env` to
+these variable names. DHCP commands require only the SSH credentials; lab commands
+use the web/API credentials.
+
+SSH password authentication is automatic, without an interactive prompt or SSH
+agent/key authentication. Passwords are not passed as command-line arguments.
+The host key must already be trusted in `~/.ssh/known_hosts`; for a new server,
+connect with `ssh root@10.0.4.4` and verify its fingerprint before accepting it.
+The DHCP helper requires root access.
+
+Use `--server <name>`
+to select a server. Only the inspected, dedicated pnet1 dnsmasq configuration is
+supported; unexpected service/configuration layouts are rejected.
+
 ### Deployment errors
+
+For `Failed to create network (11)` during start, the CLI waits 1 second and
+rechecks the node before retrying, then waits 2 seconds before a final attempt.
+It skips the retry if the node is already running. Other API failures are not
+retried; persistent network-creation failures are reported after three attempts.
+This handles transient failures but does not repair the host's network setup.
 
 HTTP failures include the server's JSON error message when available. A timeout
 identifies the request and does not imply that the server cancelled it. The default

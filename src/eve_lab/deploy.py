@@ -269,6 +269,27 @@ def apply(client, topology, prune=False):
             "message": "Applied; no nodes started" if changes else "Already matches; no changes"}
 
 
+def start_node(client, path, node):
+    """Retry only EVE-NG's transient network-creation failure, at most twice."""
+    for attempt in range(3):
+        try:
+            client.request("GET", f"{path}/nodes/{node['id']}/start")
+            return
+        except EveAPIError as error:
+            if error.code != 400 or "Failed to create network (11)" not in str(error):
+                raise
+            if attempt == 2:
+                raise RuntimeError(f"{node['name']} failed to start after 3 attempts: {error}") from error
+            time.sleep(attempt + 1)
+            current = indexed(client.request("GET", path + "/nodes")).get(node["id"])
+            if current is None or current.get("name") != node["name"]:
+                raise RuntimeError(f"Node {node['name']} changed or disappeared during start") from error
+            if str(current.get("status")) == "2":
+                return
+            if str(current.get("status")) != "0":
+                raise RuntimeError(f"Node {node['name']} has status {current.get('status')}; not retrying start") from error
+
+
 def lifecycle(client, topology, action):
     if action not in ("start", "stop"):
         raise ValueError(f"Unsupported action: {action}")
@@ -285,7 +306,7 @@ def lifecycle(client, topology, action):
             node = nodes[desired["name"]]
             if str(node.get("status")) == ("2" if action == "start" else "0"):
                 continue
-            client.request("GET", f"{path}/nodes/{node['id']}/{action}")
+            start_node(client, path, node)
             completed.append(desired["name"])
     except RuntimeError as error:
         raise RuntimeError(f"{action} failed: {error}; completed nodes: {completed}") from error
