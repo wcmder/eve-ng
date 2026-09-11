@@ -52,7 +52,7 @@ def main():
         if name == "delete":
             command.description = "Stop all remote nodes and permanently delete the entire remote lab. Local files are kept."
         if name == "apply":
-            command.add_argument("--prune", action="store_true", help="Delete remote nodes/networks absent from YAML; requires stopped nodes")
+            command.add_argument("--prune", action=argparse.BooleanOptionalAction, default=True, help="Delete undeclared nodes, networks, and stale links (default: enabled); requires stopped nodes")
         if name == "stop":
             command.description = "Stop every node in the remote lab, regardless of local node/link edits."
             command.add_argument("--remote-folder", help="Remote folder; bypass reading topology.yaml (use / for root)")

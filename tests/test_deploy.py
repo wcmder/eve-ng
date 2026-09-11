@@ -98,7 +98,7 @@ class FakeEve:
                 for port, target in payload.items():
                     if str(target) == "0":
                         raise EveAPIError("Cannot link node, invalid network_id (20033)", 400)
-                    self.ports[ident][port]["network_id"] = int(target)
+                    self.ports[ident][port]["network_id"] = 0 if target == "" else int(target)
                 return None
             if action in ("start", "stop"):
                 self.nodes[ident]["status"] = 2 if action == "start" else 0
@@ -153,13 +153,37 @@ class DeploymentTests(unittest.TestCase):
         self.topology["nodes"].pop()
         self.topology["networks"] = []
         self.topology["links"] = []
-        self.assertEqual(apply(self.client, self.topology)["changes"], [])
+        self.assertEqual(apply(self.client, self.topology, prune=False)["changes"], [])
         apply(self.client, self.topology, prune=True)
         self.assertEqual(list(self.client.nodes), ["1"])
         self.assertEqual(self.client.networks, {})
         self.assertEqual(self.client.ports["1"]["7"]["network_id"], 0)
         self.assertTrue(self.client.exists)
         self.assertEqual(apply(self.client, self.topology, prune=True)["changes"], [])
+
+    def test_default_prune_moves_management_to_new_port(self):
+        apply(self.client, self.topology)
+        self.client.ports['1']['14'] = {'name': 'Gi8', 'network_id': 0}
+        self.topology['links'][0]['interface'] = 'GigabitEthernet8'
+        apply(self.client, self.topology, prune=False)
+        self.assertEqual(self.client.ports['1']['7']['network_id'], 1)
+        result = apply(self.client, self.topology)
+        self.assertEqual(self.client.ports['1']['7']['network_id'], 0)
+        self.assertEqual(self.client.ports['1']['14']['network_id'], 1)
+        self.assertTrue(any('disconnected stale link' in change for change in result['changes']))
+        self.assertEqual(apply(self.client, self.topology)['changes'], [])
+
+    def test_stale_disconnect_must_persist(self):
+        apply(self.client, self.topology)
+        self.topology['links'] = []
+        original = self.client.request
+        def request(method, path, payload=None):
+            if method == 'PUT' and payload == {'7': ''}:
+                return None
+            return original(method, path, payload)
+        self.client.request = request
+        with self.assertRaisesRegex(RuntimeError, 'Server did not disconnect'):
+            apply(self.client, self.topology)
 
     def test_prune_preserves_direct_link_bridge(self):
         topology = self.direct_topology()
@@ -219,8 +243,27 @@ class DeploymentTests(unittest.TestCase):
         self.client.ports["3"] = {"0": {"name": "eth0", "network_id": 1}}
         self.client.writes.clear()
         with self.assertRaisesRegex(RuntimeError, "other attached"):
-            apply(self.client, topology)
+            apply(self.client, topology, prune=False)
         self.assertEqual(self.client.writes, [])
+
+    def test_prune_moves_direct_endpoint_and_management(self):
+        topology = self.direct_topology()
+        # Start with Gi2 as the cable endpoint; Gi1 is management.
+        self.client.exists = False
+        expanded, _ = expand_links(topology)
+        apply(self.client, expanded)
+        self.client.ports['1']['8'] = {'name': 'Gi2', 'network_id': 1}
+        self.client.ports['1']['7']['network_id'] = 2
+        self.client.networks['2'] = {'id': 2, 'name': 'mgmt', 'type': 'pnet1', 'visibility': 1}
+        self.client.ports['1']['14'] = {'name': 'Gi8', 'network_id': 0}
+        topology['networks'] = [{'name': 'mgmt', 'type': 'pnet1'}]
+        topology['links'].append({'node': 'R1', 'interface': 'Gi8', 'network': 'mgmt'})
+        apply(self.client, topology)
+        self.assertEqual(self.client.ports['1']['7']['network_id'], 1)
+        self.assertEqual(self.client.ports['1']['8']['network_id'], 0)
+        self.assertEqual(self.client.ports['1']['14']['network_id'], 2)
+        self.assertEqual(self.client.networks['1']['visibility'], 0)
+        self.assertEqual(apply(self.client, topology)['changes'], [])
 
     def test_direct_link_validation_and_stable_name(self):
         topology = self.direct_topology()
@@ -286,10 +329,30 @@ class DeploymentTests(unittest.TestCase):
 
     def test_drift_prevents_all_writes(self):
         apply(self.client, self.topology)
-        self.client.nodes["1"]["ethernet"] = 2
+        self.client.nodes["1"]["image"] = "different-image"
         self.client.writes.clear()
-        with self.assertRaisesRegex(RuntimeError, "Conflict on R1.ethernet"):
+        with self.assertRaisesRegex(RuntimeError, "Conflict on R1.image"):
             apply(self.client, self.topology)
+        self.assertEqual(self.client.writes, [])
+
+    def test_increase_ethernet_stopped_and_repeat(self):
+        apply(self.client, self.topology)
+        self.topology['nodes'][0]['ethernet'] = 8
+        self.client.writes.clear()
+        apply(self.client, self.topology)
+        self.assertEqual(self.client.writes, [('PUT', 'labs/palo-lab.unl/nodes/1', {'name': 'R1', 'ethernet': 8})])
+        self.assertEqual(apply(self.client, self.topology)['changes'], [])
+
+    def test_ethernet_shrink_and_running_growth_refused(self):
+        apply(self.client, self.topology)
+        self.client.writes.clear()
+        self.topology['nodes'][0]['ethernet'] = 2
+        with self.assertRaisesRegex(RuntimeError, 'Cannot reduce'):
+            apply(self.client, self.topology)
+        self.topology['nodes'][0]['ethernet'] = 8
+        self.client.nodes['1']['status'] = 2
+        with self.assertRaisesRegex(RuntimeError, 'Stop R1'):
+            apply(self.client, self.topology, prune=False)
         self.assertEqual(self.client.writes, [])
 
     def test_apply_updates_stopped_resources_and_rerun_is_noop(self):
@@ -309,7 +372,7 @@ class DeploymentTests(unittest.TestCase):
         self.topology["nodes"][0]["ram"] = 4096
         self.client.writes.clear()
         with self.assertRaisesRegex(RuntimeError, "Stop R1"):
-            apply(self.client, self.topology)
+            apply(self.client, self.topology, prune=False)
         self.assertEqual(self.client.writes, [])
 
     def test_resource_update_must_persist(self):
@@ -329,7 +392,7 @@ class DeploymentTests(unittest.TestCase):
         self.client.ports["1"]["7"]["network_id"] = 99
         self.client.writes.clear()
         with self.assertRaisesRegex(RuntimeError, "already connects"):
-            apply(self.client, self.topology)
+            apply(self.client, self.topology, prune=False)
         self.assertEqual(self.client.writes, [])
 
     def test_invalid_interface_reports_partial_creation(self):
@@ -498,7 +561,7 @@ class DeploymentTests(unittest.TestCase):
         self.client.ports["1"]["7"]["network_id"] = 0
         self.client.writes.clear()
         with self.assertRaisesRegex(RuntimeError, "Stop R1"):
-            apply(self.client, self.topology)
+            apply(self.client, self.topology, prune=False)
         self.assertEqual(self.client.writes, [])
 
     def test_list_interface_response(self):

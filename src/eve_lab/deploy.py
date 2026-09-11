@@ -79,12 +79,12 @@ def resolve(ports, name):
     return matches[0]
 
 
-def check_link(client, path, link, nodes, networks):
+def check_link(client, path, link, nodes, networks, rewire=False):
     node = nodes[link["node"]]
     ident, port = resolve(interfaces(client, path, node), link["interface"])
     target = networks.get(link["network"], {}).get("id")
     current = str(port.get("network_id", 0))
-    if current != "0" and current != target:
+    if current != "0" and current != target and not rewire:
         raise RuntimeError(f"Conflict: {link['node']} {link['interface']} already connects to network {current}")
     if current != target and str(node.get("status")) != "0":
         raise RuntimeError(f"Stop {link['node']} before adding interface connections")
@@ -126,6 +126,21 @@ def prune_objects(client, path, topology, changes):
             if name in named(client, path + "/nodes"):
                 raise RuntimeError(f"Server did not delete node {name}")
     nodes = named(client, path + "/nodes")
+    desired_ports = set()
+    for link in topology['links']:
+        node = nodes[link['node']]
+        ident, _ = resolve(interfaces(client, path, node), link['interface'])
+        desired_ports.add((node['id'], ident))
+    declared_networks = {network['name'] for network in topology['networks']}
+    retained_network_ids = {network['id'] for name, network in networks.items() if name in declared_networks}
+    for node in nodes.values():
+        for ident, port in interfaces(client, path, node).items():
+            if ((node['id'], ident) not in desired_ports and
+                    str(port.get('network_id', 0)) in retained_network_ids):
+                client.request('PUT', f"{path}/nodes/{node['id']}/interfaces", {ident: ''})
+                changes.append(f"disconnected stale link: {node['name']} {port['name']}")
+                if str(interfaces(client, path, node)[ident].get('network_id', 0)) != '0':
+                    raise RuntimeError(f"Server did not disconnect {node['name']} {port['name']}")
     # Node deletion may also remove now-unused hidden networks.
     networks = named(client, path + "/networks")
     for name, network in networks.items():
@@ -149,7 +164,7 @@ def prune_objects(client, path, topology, changes):
             changes.append(f"disconnected {node['name']} {port_name} from {name}")
 
 
-def apply(client, topology, prune=False):
+def apply(client, topology, prune=True):
     validate(topology)
     topology, direct = expand_links(topology)
     path = lab_path(topology)
@@ -185,23 +200,33 @@ def apply(client, topology, prune=False):
     networks = named(client, path + "/networks") if exists else {}
     if prune and any(str(node.get("status")) != "0" for node in nodes.values()):
         raise RuntimeError("Stop all nodes in the lab before pruning: eve stop <lab>")
-    check_direct_bridges(client, path, direct, nodes, networks)
+    if not prune:
+        check_direct_bridges(client, path, direct, nodes, networks)
     updates = []
     for kind, existing in (("nodes", nodes), ("networks", networks)):
         for desired in topology[kind]:
             if desired["name"] in existing:
                 actual = existing[desired["name"]]
-                resources = {key: desired[key] for key in ("cpu", "ram")
+                resources = {key: desired[key] for key in ("cpu", "ram", "ethernet")
                              if kind == "nodes" and key in desired
                              and str(desired[key]) != str(actual.get(key))}
                 check_settings({key: value for key, value in desired.items() if key not in resources}, actual)
+                if "ethernet" in resources and int(resources["ethernet"]) < int(actual["ethernet"]):
+                    raise RuntimeError(f"Cannot reduce {desired['name']} Ethernet interface count during apply; remove connections and resize manually")
                 if resources:
                     if str(actual.get("status")) != "0":
-                        raise RuntimeError(f"Stop {desired['name']} before changing CPU or RAM")
+                        raise RuntimeError(f"Stop {desired['name']} before changing CPU, RAM, or Ethernet interface count")
                     updates.append((desired, actual["id"], resources))
+    growing = {desired["name"] for desired, _, resources in updates if "ethernet" in resources}
     for link in topology["links"]:
         if link["node"] in nodes:
-            check_link(client, path, link, nodes, networks)
+            # Newly requested ports do not exist until after resizing. Existing
+            # ports must still pass conflict checks before any writes.
+            if link["node"] in growing:
+                ports = interfaces(client, path, nodes[link["node"]])
+                if not any(interface_key(port["name"]) == interface_key(link["interface"]) for port in ports.values()):
+                    continue
+            check_link(client, path, link, nodes, networks, rewire=prune)
     changes = []
     try:
         if not exists:
@@ -237,7 +262,7 @@ def apply(client, topology, prune=False):
         # names can only be checked after EVE-NG has created the node.
         pending = []
         for link in topology["links"]:
-            ident, current = check_link(client, path, link, nodes, networks)
+            ident, current = check_link(client, path, link, nodes, networks, rewire=prune)
             target = networks[link["network"]]["id"]
             if current != target:
                 pending.append((link, ident, target))
@@ -249,6 +274,10 @@ def apply(client, topology, prune=False):
             _, port = resolve(interfaces(client, path, node), link["interface"])
             if str(port.get("network_id")) != target:
                 raise RuntimeError("Server did not persist the requested connection")
+        if prune:
+            prune_objects(client, path, topology, changes)
+            nodes = named(client, path + "/nodes")
+            networks = named(client, path + "/networks")
         check_direct_bridges(client, path, direct, nodes, networks)
         for name, _ in direct:
             network = networks[name]
@@ -258,8 +287,6 @@ def apply(client, topology, prune=False):
                 updated = named(client, path + "/networks")
                 if name not in updated or str(updated[name].get("visibility")) != "0":
                     raise RuntimeError(f"Server did not hide direct-link bridge {name}")
-        if prune:
-            prune_objects(client, path, topology, changes)
     except (RuntimeError, ValueError) as error:
         raise RuntimeError(
             f"Apply did not complete: {error}. Completed: {changes}. "
