@@ -64,33 +64,28 @@ sessions = json.loads(DATA)
 credentials = CREDENTIALS
 created = 0
 updated = 0
-skipped = 0
 for item in sessions:
     try:
         config = crt.OpenSessionConfiguration(item["name"])
+        exists = True
     except Exception:
         config = crt.OpenSessionConfiguration("Default")
-        config.SetOption("Protocol Name", "SSH2")
-        config.SetOption("Hostname", item["host"])
-        config.SetOption("[SSH2] Port", item["port"])
-        if credentials is not None:
-            config.SetOption("Credential Title", credentials)
-            config.SetOption("Prompt For Credential Title", 0)
-        elif item["username"] is not None:
-            config.SetOption("Username", item["username"])
-        config.Save(item["name"])
-        created += 1
+        exists = False
+    config.SetOption("Protocol Name", "SSH2")
+    config.SetOption("Hostname", item["host"])
+    config.SetOption("[SSH2] Port", item["port"])
+    config.SetOption("Prompt For Credential Title", 0)
+    if credentials is not None:
+        config.SetOption("Credential Title", credentials)
     else:
-        if credentials is not None and (
-                config.GetOption("Credential Title") != credentials or
-                config.GetOption("Prompt For Credential Title") != 0):
-            config.SetOption("Credential Title", credentials)
-            config.SetOption("Prompt For Credential Title", 0)
-            config.Save()
-            updated += 1
-        else:
-            skipped += 1
-crt.Dialog.MessageBox("EVE sessions: {} created, {} credentials updated, {} existing skipped. Close and reopen Session Manager to refresh.".format(created, updated, skipped))
+        config.SetOption("Credential Title", "")
+        config.SetOption("Username", item["username"])
+    config.Save(item["name"])
+    if exists:
+        updated += 1
+    else:
+        created += 1
+crt.Dialog.MessageBox("EVE sessions: {} created, {} updated. Close and reopen Session Manager to refresh.".format(created, updated))
 '''.replace("json.loads(DATA)", "json.loads(" + repr(json.dumps(records, ensure_ascii=True)) + ")")
     script = script.replace("credentials = CREDENTIALS", "credentials = " + ascii(credentials))
     output = Path(output)

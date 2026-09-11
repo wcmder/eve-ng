@@ -7,7 +7,7 @@ from eve_lab.securecrt import generate
 
 
 class SecureCRTTests(unittest.TestCase):
-    def test_generated_script_creates_sessions_and_skips_existing(self):
+    def test_generated_script_creates_and_updates_existing(self):
         report = {'leases': [
             {'status': 'active', 'ip_address': '172.16.1.109', 'hostname': 'Router'},
             {'status': 'permanent', 'ip_address': '172.16.1.110', 'hostname': None},
@@ -38,9 +38,10 @@ class SecureCRTTests(unittest.TestCase):
             exec(compile(source, str(output), 'exec'), {'crt': crt})
             self.assertEqual(saved['eve/Router - 172.16.1.109'], {
                 'Protocol Name': 'SSH2', 'Hostname': '172.16.1.109',
-                '[SSH2] Port': 2222, 'Username': 'admin'})
+                '[SSH2] Port': 2222, 'Username': 'admin',
+                'Credential Title': '', 'Prompt For Credential Title': 0})
             exec(compile(source, str(output), 'exec'), {'crt': crt})
-            self.assertIn('0 created, 0 credentials updated, 2 existing skipped', crt.Dialog.MessageBox.call_args.args[0])
+            self.assertIn('0 created, 2 updated', crt.Dialog.MessageBox.call_args.args[0])
 
     def test_untrusted_hostname_and_empty_report(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -113,7 +114,8 @@ class SecureCRTTests(unittest.TestCase):
             options = {'Credential Title': 'old', 'Prompt For Credential Title': 1,
                        'Hostname': '10.0.0.99', '[SSH2] Port': 2222,
                        'Username': 'old-user', 'Color Scheme': 'custom'}
-            expected = dict(options, **{'Credential Title': 'eve-default', 'Prompt For Credential Title': 0})
+            expected = dict(options, **{'Credential Title': 'eve-default', 'Prompt For Credential Title': 0,
+                                        'Protocol Name': 'SSH2', 'Hostname': '10.0.0.1', '[SSH2] Port': 22})
             crt = MagicMock()
             config = crt.OpenSessionConfiguration.return_value
             config.GetOption.side_effect = options.__getitem__
@@ -121,9 +123,9 @@ class SecureCRTTests(unittest.TestCase):
             source = compile(output.read_text(), str(output), 'exec')
             exec(source, {'crt': crt})
             self.assertEqual(options, expected)
-            config.Save.assert_called_once_with()
-            self.assertIn('0 created, 1 credentials updated, 0 existing skipped', crt.Dialog.MessageBox.call_args.args[0])
+            config.Save.assert_called_once_with("eve/R1 - 10.0.0.1")
+            self.assertIn('0 created, 1 updated', crt.Dialog.MessageBox.call_args.args[0])
             config.Save.reset_mock()
             exec(source, {'crt': crt})
-            config.Save.assert_not_called()
-            self.assertIn('0 credentials updated, 1 existing skipped', crt.Dialog.MessageBox.call_args.args[0])
+            config.Save.assert_called_once_with("eve/R1 - 10.0.0.1")
+            self.assertIn('0 created, 1 updated', crt.Dialog.MessageBox.call_args.args[0])

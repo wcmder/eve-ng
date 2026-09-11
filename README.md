@@ -175,13 +175,12 @@ Enter to accept its hostname (or IP if missing), or enter a name such as `R1`.
 If a default name is already used in this export, its IP is appended. Duplicate
 names (ignoring case) and invalid names prompt again. Ctrl+C or end-of-input
 cancels without replacing the output file. Existing SecureCRT sessions are checked
-only when you run the generated script. Matching names receive credential updates
-when `--credentials` is supplied; otherwise they are skipped.
+only when you run the generated script. Matching names are updated with the generated IP, port, and login selection.
 Without `--interactive`, names continue to include both hostname and IP.
 
 Only active and permanent lease records are included, with one session per IP.
 Missing hostnames fall back to the IP address. DHCP does not identify the EVE lab,
-so sessions share the `eve` folder. Existing session names are matched for credential updates; no sessions
+so sessions share the `eve` folder. Existing session names are matched for updates; no sessions
 are deleted. If DHCP changes an address or hostname, a new session may be created;
 remove obsolete entries in SecureCRT as needed.
 
@@ -191,11 +190,12 @@ credential title, so future username/password changes in the credential manager
 apply to those sessions. The title must already exist in the SecureCRT configuration
 where you run the script; the generator does not validate or create credential sets.
 No password is read or exported. `--credentials` cannot be combined with `--username`.
-Existing sessions with matching names receive the selected credential title.
-Their IP, port, username, and other settings are preserved. Sessions already using
-that credential with credential prompting disabled are skipped. The script reports
-created, credentials updated, and skipped counts. Without `--credentials`, existing
-sessions are skipped. Matching is by full session name under `eve`, not IP address.
+Existing sessions with matching names are updated rather than skipped. The script
+sets SSH2, the reported IP, the selected port, and the credential title. Without
+`--credentials`, it clears the credential reference and sets the supplied username
+(or blank if omitted). Other session settings remain unchanged. The script reports
+created and updated counts. Matching is by full session name under `eve`, not IP
+address. No other sessions are removed.
 SecureCRT documents named credentials
 [here](https://www.vandyke.com/support/tips/how-to-manage-credentials-in-securecrt-securefx.html).
 
