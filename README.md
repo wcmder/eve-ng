@@ -29,6 +29,9 @@ Run from the repository root with the virtual environment activated:
 | `eve templates` | List available device templates. | Yes |
 | `eve template <name>` | Fetch template details, image options, and server defaults. | Yes |
 | `eve securecrt pnet1 [--username admin]` | Generate a SecureCRT SSH session import script from DHCP leases. | SSH |
+| `eve nat status pnet1` | Show current NAT rules and managed pnet1 configuration state. | SSH |
+| `eve nat add pnet1 [--dry-run]` | Add runtime Internet NAT through pnet0. | SSH |
+| `eve nat remove pnet1 [--dry-run]` | Remove only the NAT rules managed by this command. | SSH |
 | `eve dhcp report pnet1` | List DHCP leases, addresses, hostnames, and expiration times. | SSH |
 | `eve dhcp clear pnet1 [--dry-run]` | Back up and clear pnet1 DHCP server leases over SSH. | SSH |
 
@@ -133,6 +136,48 @@ Deletion executes immediately without an interactive prompt. If the lab is alrea
 absent, the command succeeds without changes. If a node cannot be stopped, deletion
 aborts; nodes stopped earlier remain stopped. Failures report partial progress.
 The local topology file must still exist and pass validation.
+
+### pnet1 Internet NAT through pnet0
+
+```sh
+eve nat status pnet1
+eve nat add pnet1 --dry-run
+eve nat add pnet1
+eve nat remove pnet1 --dry-run
+eve nat remove pnet1
+```
+
+`status` is read-only. It reports all IPv4 NAT table rules (including WireGuard),
+the managed pnet1 rules and jumps, and whether IPv4 forwarding is enabled.
+`managed_state` is `absent`, `configured`, `legacy`, or `unexpected`. Configured
+means the managed rule and link are installed, not that guest Internet connectivity
+has been tested. Legacy means the previous exclusion rules are still installed;
+run add to migrate them. Unexpected rules are shown for inspection.
+
+Uses `.env` SSH credentials and requires root. `--server <name>` selects the host.
+Add detects pnet1's IPv4 subnet and masquerades traffic from that subnet leaving
+pnet0, excluding the WireGuard subnet `172.16.0.0/24`. Other destinations, including
+private networks reached through pnet0, are NATed. This is IPv4 only. Guests must use
+the host's pnet1 address as their gateway (currently `172.16.1.1`) and a working
+DNS server. No guest configuration is changed.
+
+The host must already have IPv4 forwarding enabled, Internet routing via pnet0,
+and an unrestricted FORWARD chain with ACCEPT policy (as on the inspected host).
+Custom forwarding rules cause add to stop for manual review. The command does not
+change routing, forwarding policy, or the host-wide forwarding sysctl.
+
+The effective match is `-s 172.16.1.0/24 ! -d 172.16.0.0/24 -o pnet0 -j MASQUERADE`
+(with the source subnet detected from pnet1). Add also migrates the previous
+managed private/reserved exclusion rules to this WireGuard-only exemption.
+
+Rules use the dedicated `EVE_PNET1_NAT` chain and a tagged POSTROUTING link. Repeated
+add/remove calls are safe; unrelated rules, including WireGuard NAT, remain intact.
+Unexpected rules in the managed chain or unrecognized references cause an error.
+A dry run performs read-only checks and lists the proposed commands. Runtime
+changes are **not persisted across host reboots**; rerun add after reboot.
+Remove stops NAT for new connections; existing tracked NAT connections may retain
+their mappings until they expire. No connection tracking entries are flushed.
+Failures report completed commands without automatic rollback.
 
 ### Report pnet1 DHCP leases
 

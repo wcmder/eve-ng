@@ -10,6 +10,7 @@ import yaml
 
 from .client import EveClient
 from .config import load_server
+from .nat import configure as configure_nat
 from .securecrt import generate as generate_securecrt
 from .dhcp import clear as clear_dhcp, report as report_dhcp
 from .deploy import apply, delete, lab_status, lifecycle, plan
@@ -20,6 +21,11 @@ def main():
     parser = argparse.ArgumentParser(description="EVE-NG lab tooling")
     parser.add_argument("--root", type=Path, default=Path.cwd(), help="Repository root")
     commands = parser.add_subparsers(dest="command", required=True)
+    nat = commands.add_parser("nat", help="Manage runtime pnet1 Internet NAT through pnet0")
+    nat.add_argument("nat_action", choices=["add", "remove", "status"])
+    nat.add_argument("interface", choices=["pnet1"])
+    nat.add_argument("--server", default="default")
+    nat.add_argument("--dry-run", action="store_true", help="Inspect and show commands without changing NAT")
     dhcp = commands.add_parser("dhcp", help="Manage host DHCP leases over SSH")
     dhcp_commands = dhcp.add_subparsers(dest="dhcp_action", required=True)
     clear = dhcp_commands.add_parser("clear", help="Back up and clear pnet1 DHCP server leases")
@@ -56,7 +62,10 @@ def main():
             command.add_argument("name")
     args = parser.parse_args()
     try:
-        server = load_server(args.root, args.server, auth="ssh" if args.command in ("dhcp", "securecrt") else "web")
+        server = load_server(args.root, args.server, auth="ssh" if args.command in ("dhcp", "securecrt", "nat") else "web")
+        if args.command == "nat":
+            print(json.dumps(configure_nat(server, args.nat_action, args.interface, args.dry_run), indent=2))
+            return
         if args.command == "securecrt":
             if not 1 <= args.port <= 65535:
                 raise ValueError("SSH port must be between 1 and 65535")

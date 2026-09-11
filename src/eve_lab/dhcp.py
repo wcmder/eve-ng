@@ -19,16 +19,20 @@ def report(server, interface):
 def _invoke(server, interface, dry_run=False, report=False):
     if interface != "pnet1":
         raise ValueError("DHCP commands currently supports only pnet1")
-    host = server.get("ssh_host") or urlsplit(server["url"]).hostname
-    user = server["ssh_username"]
-    if not host or host.startswith("-") or not user or user.startswith("-"):
-        raise ValueError("Invalid SSH host or user")
     source = Path(__file__).with_name("dhcp_remote.py").read_text()
     remote = "python3 -c " + shlex.quote(source)
     if report:
         remote += " --report"
     if dry_run:
         remote += " --dry-run"
+    return run_remote(server, remote)
+
+
+def run_remote(server, remote):
+    host = server.get("ssh_host") or urlsplit(server["url"]).hostname
+    user = server["ssh_username"]
+    if not host or host.startswith("-") or not user or user.startswith("-"):
+        raise ValueError("Invalid SSH host or user")
     client = paramiko.SSHClient()
     try:
         client.load_system_host_keys()
@@ -43,7 +47,7 @@ def _invoke(server, interface, dry_run=False, report=False):
         error = stderr.read().decode("utf-8", errors="replace").strip()
         status = stdout.channel.recv_exit_status()
         if status:
-            raise RuntimeError(f"SSH DHCP command failed (exit {status}): {error}")
+            raise RuntimeError(f"SSH remote command failed (exit {status}): {error}")
     except paramiko.AuthenticationException:
         raise RuntimeError("SSH authentication failed; check SSH credentials in .env (EVE_SSH_USERNAME/EVE_SSH_PASSWORD)") from None
     except (paramiko.SSHException, OSError) as exc:
@@ -53,4 +57,4 @@ def _invoke(server, interface, dry_run=False, report=False):
     try:
         return json.loads(output)
     except ValueError:
-        raise RuntimeError("DHCP helper returned invalid JSON") from None
+        raise RuntimeError("Remote helper returned invalid JSON") from None
