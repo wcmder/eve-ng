@@ -10,6 +10,7 @@ import yaml
 
 from .client import EveClient
 from .config import load_server
+from .securecrt import generate as generate_securecrt
 from .dhcp import clear as clear_dhcp, report as report_dhcp
 from .deploy import apply, delete, lab_status, lifecycle, plan
 from .topology import load_lab_target, load_topology
@@ -28,6 +29,15 @@ def main():
     report = dhcp_commands.add_parser("report", help="List pnet1 DHCP leases without changes")
     report.add_argument("interface", choices=["pnet1"])
     report.add_argument("--server", default="default")
+    securecrt = commands.add_parser("securecrt", help="Generate SSH sessions from the DHCP report")
+    securecrt.add_argument("interface", choices=["pnet1"])
+    securecrt.add_argument("--server", default="default")
+    securecrt.add_argument("--output", type=Path, help="Output script (default: .state/securecrt-eve.py under root)")
+    credential_options = securecrt.add_mutually_exclusive_group()
+    credential_options.add_argument("--credentials", help="Saved SecureCRT credential title, e.g. eve-default")
+    credential_options.add_argument("--username", help="Device SSH username (default: blank)")
+    securecrt.add_argument("--interactive", action="store_true", help="Prompt for each session name")
+    securecrt.add_argument("--port", type=int, default=22, help="Device SSH port (default: 22)")
     for name in ("plan", "status", "templates", "template", "apply", "start", "stop", "delete"):
         command = commands.add_parser(name)
         command.add_argument("--server", default="default")
@@ -46,7 +56,15 @@ def main():
             command.add_argument("name")
     args = parser.parse_args()
     try:
-        server = load_server(args.root, args.server, auth="ssh" if args.command == "dhcp" else "web")
+        server = load_server(args.root, args.server, auth="ssh" if args.command in ("dhcp", "securecrt") else "web")
+        if args.command == "securecrt":
+            if not 1 <= args.port <= 65535:
+                raise ValueError("SSH port must be between 1 and 65535")
+            result = generate_securecrt(report_dhcp(server, args.interface),
+                                       args.output or args.root / ".state/securecrt-eve.py",
+                                       args.username, args.port, interactive=args.interactive, credentials=args.credentials)
+            print(json.dumps(result, indent=2))
+            return
         if args.command == "dhcp":
             result = (report_dhcp(server, args.interface) if args.dhcp_action == "report"
                       else clear_dhcp(server, args.interface, args.dry_run))

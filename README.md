@@ -28,6 +28,7 @@ Run from the repository root with the virtual environment activated:
 | `eve status [lab]` | Read server statistics, or a lab's nodes and networks when a lab is provided. | Yes |
 | `eve templates` | List available device templates. | Yes |
 | `eve template <name>` | Fetch template details, image options, and server defaults. | Yes |
+| `eve securecrt pnet1 [--username admin]` | Generate a SecureCRT SSH session import script from DHCP leases. | SSH |
 | `eve dhcp report pnet1` | List DHCP leases, addresses, hostnames, and expiration times. | SSH |
 | `eve dhcp clear pnet1 [--dry-run]` | Back up and clear pnet1 DHCP server leases over SSH. | SSH |
 
@@ -147,6 +148,65 @@ permanent leases have `null` expiration and remaining seconds. These are server
 records, not a check that clients are online. The report reads the dedicated
 pnet1 lease file without stopping DHCP, creating backups, or changing leases.
 It uses the same `.env` SSH credentials as `clear` below.
+
+### Generate SecureCRT SSH sessions
+
+```sh
+eve securecrt pnet1
+eve securecrt pnet1 --username admin
+eve securecrt pnet1 --interactive --username admin
+eve securecrt pnet1 --interactive --credentials eve-default
+eve securecrt pnet1 --username admin --port 22 --output .state/securecrt-eve.py
+```
+
+Fetches the DHCP report over SSH and writes `.state/securecrt-eve.py` by default.
+Use `--server <name>` for another configured server. The default output directory
+is gitignored. Explicit `--output` paths are relative to your working directory;
+rerunning the generator replaces that output file with the latest report.
+
+In SecureCRT, select **Script → Run** and choose the generated Python file.
+It creates SSH2 sessions inside the **eve** Session Manager folder, for example
+`eve/Router - 172.16.1.109`. Close and reopen Session Manager if needed to refresh.
+This uses SecureCRT's [session scripting API](https://www.vandyke.com/support/tips/importsessions.html).
+The generated script runs inside SecureCRT, not with your shell's Python.
+
+With `--interactive`, the terminal prompts for each IP's session name. Press
+Enter to accept its hostname (or IP if missing), or enter a name such as `R1`.
+If a default name is already used in this export, its IP is appended. Duplicate
+names (ignoring case) and invalid names prompt again. Ctrl+C or end-of-input
+cancels without replacing the output file. Existing SecureCRT sessions are checked
+only when you run the generated script. Matching names receive credential updates
+when `--credentials` is supplied; otherwise they are skipped.
+Without `--interactive`, names continue to include both hostname and IP.
+
+Only active and permanent lease records are included, with one session per IP.
+Missing hostnames fall back to the IP address. DHCP does not identify the EVE lab,
+so sessions share the `eve` folder. Existing session names are matched for credential updates; no sessions
+are deleted. If DHCP changes an address or hostname, a new session may be created;
+remove obsolete entries in SecureCRT as needed.
+
+For a **named saved credential** under SecureCRT's **Global Options → General →
+Credentials**, use `--credentials eve-default`. This links new sessions to that
+credential title, so future username/password changes in the credential manager
+apply to those sessions. The title must already exist in the SecureCRT configuration
+where you run the script; the generator does not validate or create credential sets.
+No password is read or exported. `--credentials` cannot be combined with `--username`.
+Existing sessions with matching names receive the selected credential title.
+Their IP, port, username, and other settings are preserved. Sessions already using
+that credential with credential prompting disabled are skipped. The script reports
+created, credentials updated, and skipped counts. Without `--credentials`, existing
+sessions are skipped. Matching is by full session name under `eve`, not IP address.
+SecureCRT documents named credentials
+[here](https://www.vandyke.com/support/tips/how-to-manage-credentials-in-securecrt-securefx.html).
+
+New sessions use SecureCRT's Default session settings, with protocol, address,
+and port replaced (port defaults to 22). Use `--credentials` to select saved
+credentials, or `--username` to set a device username (otherwise blank).
+The generated script contains only the credential title, not its saved password.
+The generator does not export `.env` passwords.
+The `.env` SSH credentials are used only to retrieve leases from EVE-NG.
+Devices must have SSH enabled and their management addresses must be reachable
+from your workstation; the script does not configure SSH or connect to devices.
 
 ### Clear pnet1 DHCP leases
 
