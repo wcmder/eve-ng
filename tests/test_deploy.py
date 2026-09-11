@@ -343,12 +343,37 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(self.client.writes, [('PUT', 'labs/palo-lab.unl/nodes/1', {'name': 'R1', 'ethernet': 8})])
         self.assertEqual(apply(self.client, self.topology)['changes'], [])
 
+    def test_shrink_disconnects_removed_ports_before_resize(self):
+        apply(self.client, self.topology)
+        self.client.ports['1'] = {str(i): {'name': 'Gi' + str(i+1), 'network_id': 1 if i in (0, 3) else 0} for i in range(4)}
+        self.topology['nodes'][0]['ethernet'] = 2
+        original = self.client.request
+        def request(method, path, payload=None):
+            if method == 'PUT' and path.endswith('/nodes/1') and 'ethernet' in payload:
+                self.assertEqual(self.client.ports['1']['3']['network_id'], 0)
+                self.client.ports['1'] = {k:v for k,v in self.client.ports['1'].items() if int(k) < payload['ethernet']}
+            return original(method, path, payload)
+        self.client.request = request
+        apply(self.client, self.topology)
+        self.assertEqual(len(self.client.ports['1']), 2)
+        self.assertEqual(apply(self.client, self.topology)['changes'], [])
+
+    def test_shrink_rejects_yaml_link_on_removed_port(self):
+        apply(self.client, self.topology)
+        self.client.ports['1'] = {str(i): {'name': 'Gi' + str(i+1), 'network_id': 0} for i in range(4)}
+        self.topology['nodes'][0]['ethernet'] = 2
+        self.topology['links'][0]['interface'] = 'Gi4'
+        self.client.writes.clear()
+        with self.assertRaisesRegex(RuntimeError, 'YAML link uses removed'):
+            apply(self.client, self.topology)
+        self.assertEqual(self.client.writes, [])
+
     def test_ethernet_shrink_and_running_growth_refused(self):
         apply(self.client, self.topology)
         self.client.writes.clear()
         self.topology['nodes'][0]['ethernet'] = 2
         with self.assertRaisesRegex(RuntimeError, 'Cannot reduce'):
-            apply(self.client, self.topology)
+            apply(self.client, self.topology, prune=False)
         self.topology['nodes'][0]['ethernet'] = 8
         self.client.nodes['1']['status'] = 2
         with self.assertRaisesRegex(RuntimeError, 'Stop R1'):

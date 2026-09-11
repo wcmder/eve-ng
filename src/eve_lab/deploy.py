@@ -203,6 +203,7 @@ def apply(client, topology, prune=True):
     if not prune:
         check_direct_bridges(client, path, direct, nodes, networks)
     updates = []
+    shrinking = {}
     for kind, existing in (("nodes", nodes), ("networks", networks)):
         for desired in topology[kind]:
             if desired["name"] in existing:
@@ -212,7 +213,18 @@ def apply(client, topology, prune=True):
                              and str(desired[key]) != str(actual.get(key))}
                 check_settings({key: value for key, value in desired.items() if key not in resources}, actual)
                 if "ethernet" in resources and int(resources["ethernet"]) < int(actual["ethernet"]):
-                    raise RuntimeError(f"Cannot reduce {desired['name']} Ethernet interface count during apply; remove connections and resize manually")
+                    if not prune or actual.get("type") != "qemu":
+                        raise RuntimeError(f"Cannot reduce {desired['name']} Ethernet count without pruning on a QEMU node")
+                    ports = interfaces(client, path, actual)
+                    if len(ports) != int(actual['ethernet']) or not all(key.isdigit() for key in ports):
+                        raise RuntimeError(f"Cannot determine removable Ethernet ports for {desired['name']}")
+                    removed = sorted(ports, key=int)[int(resources['ethernet']):]
+                    for link in topology['links']:
+                        if link['node'] == desired['name']:
+                            port_id, _ = resolve(ports, link['interface'])
+                            if port_id in removed:
+                                raise RuntimeError(f"YAML link uses removed interface {desired['name']} {link['interface']}; update the link before reducing Ethernet count")
+                    shrinking[desired['name']] = removed
                 if resources:
                     if str(actual.get("status")) != "0":
                         raise RuntimeError(f"Stop {desired['name']} before changing CPU, RAM, or Ethernet interface count")
@@ -240,12 +252,25 @@ def apply(client, topology, prune=True):
             current = named(client, path + "/nodes")[desired["name"]]
             if current["id"] != ident or str(current.get("status")) != "0":
                 raise RuntimeError(f"Node {desired['name']} changed or started during apply; retry after stopping it")
+            for port_id in shrinking.get(desired['name'], []):
+                port = interfaces(client, path, current)[port_id]
+                if str(port.get('network_id', 0)) != '0':
+                    client.request('PUT', f"{path}/nodes/{ident}/interfaces", {port_id: ''})
+                    changes.append(f"disconnected removed port: {desired['name']} {port['name']}")
+                    if str(interfaces(client, path, current)[port_id].get('network_id', 0)) != '0':
+                        raise RuntimeError(f"Server did not disconnect removed interface {port['name']}")
             # EVE-NG's edit() changes CPU/RAM without setting its modified flag.
             # Sending the unchanged name triggers persistence without a rename.
             client.request("PUT", f"{path}/nodes/{ident}", {"name": current["name"], **resources})
             changes.append(f"updated {desired['name']}: {resources}")
             nodes = named(client, path + "/nodes")
             check_settings(desired, nodes[desired["name"]])
+            if desired['name'] in shrinking:
+                remaining_ports = interfaces(client, path, nodes[desired['name']])
+                if len(remaining_ports) != int(desired['ethernet']):
+                    raise RuntimeError(f"Server did not resize interfaces for {desired['name']}")
+        # Resizing may discard an unused hidden bridge; refresh before creating objects.
+        networks = named(client, path + "/networks")
         for kind, existing in (("networks", networks), ("nodes", nodes)):
             for desired in topology[kind]:
                 name = desired["name"]

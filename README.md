@@ -63,7 +63,9 @@ Reruns match objects by name within the remote lab and skip matching objects and
 connections. Explicit `cpu` and `ram` changes are applied to stopped nodes and
 verified afterward; running nodes must be stopped first. Differences in other
 settings (such as image) still cause a conflict. Ethernet interface counts can
-be increased on stopped nodes; decreases require manual resizing. This version
+be increased on stopped nodes. QEMU interface counts can also decrease with
+pruning: links to removed ports must be absent from YAML, and existing attachments
+on removed ports are disconnected before resizing. This version
 does not replace conflicting object settings. With pruning enabled, stopped
 interfaces are rewired to match YAML. Deletion
 of undeclared nodes/networks and stale links is enabled by default.
@@ -406,8 +408,8 @@ becomes `c8000v-17.15.06`. `cpu` is the vCPU count, `ethernet` is the Ethernet
 interface count, and optional `ram` is RAM in MB. Optional node fields also include
 `console`, `left`, and `top`; networks accept optional `left` and `top` positions.
 After editing `cpu` or `ram`, run `eve stop <lab>` and `eve apply <lab>` to update
-existing nodes, then `eve start <lab>` when ready. Ethernet interface counts can also be increased on stopped nodes. Decreases are
-rejected to avoid removing connected interfaces; resize those manually.
+existing nodes, then `eve start <lab>` when ready. Ethernet interface counts can also be increased on stopped nodes. QEMU counts can decrease with pruning enabled after removing YAML links to the
+ports being removed. Other node types require manual downsizing.
 
 Add entries under `links` to connect additional interfaces; increasing `ethernet`
 alone does not connect them. Place guest configuration templates in each lab's
