@@ -59,6 +59,36 @@ class DhcpTests(unittest.TestCase):
         self.assertEqual(self.commands[-1][1], 'start')
         self.assertTrue(self.leases.read_text())
 
+    def test_report_records_without_changes(self):
+        original = ('200 aa:bb:cc:dd:ee:ff 172.16.1.100 router id1\n'
+                    '0 aa:bb:cc:dd:ee:01 172.16.1.101 * *\n'
+                    '50 aa:bb:cc:dd:ee:02 172.16.1.102 old *\n')
+        self.leases.write_text(original)
+        with patch('eve_lab.dhcp_remote.time.time', return_value=100):
+            result = clear_leases(config_path=self.config, lease_path=self.leases, report=True)
+        self.assertEqual(result['lease_count'], 3)
+        active, permanent, expired = result['leases']
+        self.assertEqual(active['remaining_seconds'], 100)
+        self.assertEqual(active['status'], 'active')
+        self.assertEqual(active['expires_at'], '1970-01-01T00:03:20+00:00')
+        self.assertEqual(permanent['status'], 'permanent')
+        self.assertIsNone(permanent['hostname'])
+        self.assertIsNone(permanent['expires_at'])
+        self.assertEqual(expired['status'], 'expired')
+        self.assertEqual(expired['remaining_seconds'], 0)
+        self.assertEqual(self.leases.read_text(), original)
+        self.assertFalse(list(self.root.glob('*.backup-*')))
+        self.assertEqual([cmd[1] for cmd in self.commands], ['show', 'is-active'])
+
+    def test_empty_report_and_invalid_record(self):
+        self.leases.write_text('')
+        result = clear_leases(config_path=self.config, lease_path=self.leases, report=True)
+        self.assertEqual(result['leases'], [])
+        for record in ('invalid', 'invalid mac ip host client'):
+            self.leases.write_text(record)
+            with self.assertRaisesRegex(RuntimeError, 'Invalid DHCP lease'):
+                clear_leases(config_path=self.config, lease_path=self.leases, report=True)
+
     def test_symlink_rejected(self):
         other = self.root / 'other.leases'
         self.leases.rename(other)

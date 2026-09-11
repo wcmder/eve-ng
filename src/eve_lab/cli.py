@@ -10,7 +10,7 @@ import yaml
 
 from .client import EveClient
 from .config import load_server
-from .dhcp import clear as clear_dhcp
+from .dhcp import clear as clear_dhcp, report as report_dhcp
 from .deploy import apply, delete, lab_status, lifecycle, plan
 from .topology import load_lab_target, load_topology
 
@@ -25,6 +25,9 @@ def main():
     clear.add_argument("interface", choices=["pnet1"])
     clear.add_argument("--server", default="default")
     clear.add_argument("--dry-run", action="store_true", help="Inspect lease count and configuration without changes")
+    report = dhcp_commands.add_parser("report", help="List pnet1 DHCP leases without changes")
+    report.add_argument("interface", choices=["pnet1"])
+    report.add_argument("--server", default="default")
     for name in ("plan", "status", "templates", "template", "apply", "start", "stop", "delete"):
         command = commands.add_parser(name)
         command.add_argument("--server", default="default")
@@ -45,7 +48,9 @@ def main():
     try:
         server = load_server(args.root, args.server, auth="ssh" if args.command == "dhcp" else "web")
         if args.command == "dhcp":
-            print(json.dumps(clear_dhcp(server, args.interface, args.dry_run), indent=2))
+            result = (report_dhcp(server, args.interface) if args.dhcp_action == "report"
+                      else clear_dhcp(server, args.interface, args.dry_run))
+            print(json.dumps(result, indent=2))
             return
         if args.command == "stop":
             topology = load_lab_target(args.root, args.lab, args.remote_folder)

@@ -28,6 +28,7 @@ Run from the repository root with the virtual environment activated:
 | `eve status [lab]` | Read server statistics, or a lab's nodes and networks when a lab is provided. | Yes |
 | `eve templates` | List available device templates. | Yes |
 | `eve template <name>` | Fetch template details, image options, and server defaults. | Yes |
+| `eve dhcp report pnet1` | List DHCP leases, addresses, hostnames, and expiration times. | SSH |
 | `eve dhcp clear pnet1 [--dry-run]` | Back up and clear pnet1 DHCP server leases over SSH. | SSH |
 
 All commands print JSON. Remote commands log in and log out using an in-memory
@@ -131,6 +132,21 @@ Deletion executes immediately without an interactive prompt. If the lab is alrea
 absent, the command succeeds without changes. If a node cannot be stopped, deletion
 aborts; nodes stopped earlier remain stopped. Failures report partial progress.
 The local topology file must still exist and pass validation.
+
+### Report pnet1 DHCP leases
+
+```sh
+eve dhcp report pnet1
+eve dhcp report pnet1 --server default
+```
+
+Returns JSON with the lease count and each lease's IP address, MAC address,
+hostname, client ID, UTC expiration time, remaining seconds, and status
+(`active`, `expired`, or `permanent`). Unknown hostnames/client IDs are `null`;
+permanent leases have `null` expiration and remaining seconds. These are server
+records, not a check that clients are online. The report reads the dedicated
+pnet1 lease file without stopping DHCP, creating backups, or changing leases.
+It uses the same `.env` SSH credentials as `clear` below.
 
 ### Clear pnet1 DHCP leases
 

@@ -1,5 +1,6 @@
 """Standalone helper executed over SSH on the EVE-NG host."""
 
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -17,13 +18,13 @@ def run(*args):
 
 
 def clear_leases(dry_run=False, config_path="/etc/eve-dhcp/pnet1.conf",
-                 lease_path="/var/lib/eve-dhcp/pnet1.leases"):
+                 lease_path="/var/lib/eve-dhcp/pnet1.leases", report=False):
     interface = "pnet1"
     unit = "eve-pnet1-dhcp.service"
     config = Path(config_path)
     leases = Path(lease_path)
     if os.geteuid() != 0:
-        raise RuntimeError("DHCP lease cleanup requires SSH as root")
+        raise RuntimeError("DHCP lease access requires SSH as root")
     options = {}
     for line in config.read_text().splitlines():
         line = line.strip()
@@ -42,6 +43,30 @@ def clear_leases(dry_run=False, config_path="/etc/eve-dhcp/pnet1.conf",
         raise RuntimeError("pnet1 DHCP service is not active")
     if leases.is_symlink() or not leases.is_file():
         raise RuntimeError("Expected a regular pnet1 lease file")
+    if report:
+        records = []
+        now = time.time()
+        for number, line in enumerate(leases.read_text().splitlines(), 1):
+            if not line.strip():
+                continue
+            fields = line.split()
+            if len(fields) != 5:
+                raise RuntimeError(f"Invalid DHCP lease record on line {number}")
+            expiry, mac, address, hostname, client_id = fields
+            try:
+                expiry = int(expiry)
+                if expiry < 0:
+                    raise ValueError()
+                expires_at = datetime.fromtimestamp(expiry, timezone.utc).isoformat() if expiry else None
+            except (ValueError, OverflowError, OSError):
+                raise RuntimeError(f"Invalid DHCP lease expiry on line {number}") from None
+            records.append({"ip_address": address, "mac_address": mac,
+                            "hostname": None if hostname == "*" else hostname,
+                            "client_id": None if client_id == "*" else client_id,
+                            "expires_at": expires_at,
+                            "remaining_seconds": max(0, int(expiry - now)) if expiry else None,
+                            "status": "permanent" if not expiry else "active" if expiry > now else "expired"})
+        return {"interface": interface, "service": unit, "lease_count": len(records), "leases": records}
     result = {"interface": interface, "service": unit, "dry_run": dry_run,
               "lease_count": len(leases.read_text().splitlines())}
     if dry_run:
@@ -70,7 +95,7 @@ def clear_leases(dry_run=False, config_path="/etc/eve-dhcp/pnet1.conf",
 
 if __name__ == "__main__":
     try:
-        print(json.dumps(clear_leases("--dry-run" in sys.argv)))
+        print(json.dumps(clear_leases("--dry-run" in sys.argv, report="--report" in sys.argv)))
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
-        print(f"DHCP cleanup error: {error}", file=sys.stderr)
+        print(f"DHCP error: {error}", file=sys.stderr)
         sys.exit(1)

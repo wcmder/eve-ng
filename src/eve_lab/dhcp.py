@@ -9,14 +9,24 @@ import paramiko
 
 
 def clear(server, interface, dry_run=False):
+    return _invoke(server, interface, dry_run=dry_run)
+
+
+def report(server, interface):
+    return _invoke(server, interface, report=True)
+
+
+def _invoke(server, interface, dry_run=False, report=False):
     if interface != "pnet1":
-        raise ValueError("DHCP cleanup currently supports only pnet1")
+        raise ValueError("DHCP commands currently supports only pnet1")
     host = server.get("ssh_host") or urlsplit(server["url"]).hostname
     user = server["ssh_username"]
     if not host or host.startswith("-") or not user or user.startswith("-"):
         raise ValueError("Invalid SSH host or user")
     source = Path(__file__).with_name("dhcp_remote.py").read_text()
     remote = "python3 -c " + shlex.quote(source)
+    if report:
+        remote += " --report"
     if dry_run:
         remote += " --dry-run"
     client = paramiko.SSHClient()
