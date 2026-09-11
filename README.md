@@ -26,6 +26,8 @@ Run from the repository root with the virtual environment activated:
 | `eve stop <lab>` | Stop every node in the remote lab, skipping those already stopped. | Yes |
 | `eve delete <lab>` | Stop all remote nodes and permanently delete the entire remote lab. | Yes |
 | `eve status [lab]` | Read server statistics, or a lab's nodes and networks when a lab is provided. | Yes |
+| `eve backup <lab> [--check]` | Export supported node configs through EVE-NG and save local backups; check reports support only. | Yes |
+| `eve restore <lab> --from <backup-directory> [--check] [--wipe]` | Upload and enable saved startup configs; optionally wipe restored nodes for initialization. | Yes |
 | `eve templates` | List available device templates. | Yes |
 | `eve template <name>` | Fetch template details, image options, and server defaults. | Yes |
 | `eve securecrt pnet1 [--username admin]` | Generate a SecureCRT SSH session import script from DHCP leases. | SSH |
@@ -146,6 +148,95 @@ Deletion executes immediately without an interactive prompt. If the lab is alrea
 absent, the command succeeds without changes. If a node cannot be stopped, deletion
 aborts; nodes stopped earlier remain stopped. Failures report partial progress.
 The local topology file must still exist and pass validation.
+
+### Back up device configurations through EVE-NG
+
+```sh
+eve backup palo-lab --check   # Query support; no exports or local files
+eve backup palo-lab           # Export supported nodes and download their configs
+```
+
+Uses the EVE-NG web/API credentials in `.env`, without an SSH connection. The CLI
+does not accept device credentials, but EVE's export script still needs console
+access and may require device login credentials; it does not bypass authentication.
+The command inspects all current remote nodes in the lab, including nodes
+added in the GUI. It uses the Community API's exportable configuration list to
+identify support; nodes missing from that list print `Skipped <name> (<template>)`
+with a reason. A failure to retrieve that list is an error, not an unsupported result.
+
+EVE-NG's published export support includes Catalyst 8000v; Palo Alto is not listed.
+The installed host's capabilities take precedence, so run `--check` once it is
+online. Support for the exact installed version/images has not yet been verified.
+References: [EVE export API](https://www.eve-ng.net/index.php/how-to-eve-ng-api/),
+[EVE Cookbook](https://eve-ng.net/wp-content/uploads/2024/04/EVE-PE-BOOK-6.3-2024.pdf).
+This implementation targets the Community API; Pro config-set endpoints differ.
+
+Before exporting, save configuration inside each supported device, e.g. Cisco
+`copy running-config startup-config`. EVE's export may require the node to be
+running and ready for console access. The command does not start, stop, or wipe
+nodes. Export updates EVE's stored startup configuration, then downloads it using
+`GET .../configs/<id>` after a successful `PUT .../nodes/<id>/export`.
+This is a configuration backup, not a VM disk or snapshot backup.
+
+Successful exports are saved as:
+
+```text
+labs/palo-lab/configs/backups/<UTC-timestamp>/
+  R0-1.cfg
+  R-A-2.cfg
+  manifest.json
+```
+
+Filenames include the remote node ID to avoid duplicate-name collisions. Existing
+backups are preserved. Backup directories are gitignored and created with private
+permissions because device configs may contain secrets. Config contents are not
+printed. The manifest records saved, skipped, and failed nodes.
+
+Unsupported nodes do not block other backups. Export/download failures are printed
+and recorded separately, processing continues, and the command exits nonzero if
+any node failed. An empty configuration is a failure. Failed exports never fall
+back to downloading an old stored configuration. If nothing was saved, results
+are printed but no backup directory is created. Palo Alto requires a separate
+device-native backup workflow when the server does not support its export.
+
+### Restore or initialize from a backup
+
+Use a directory created by `eve backup`, containing `manifest.json` and its config
+files. Replace `<UTC-timestamp>` with the actual backup directory name:
+
+```sh
+eve restore palo-lab --from labs/palo-lab/configs/backups/<UTC-timestamp> --check
+eve stop palo-lab
+eve restore palo-lab --from labs/palo-lab/configs/backups/<UTC-timestamp>
+```
+
+The default uploads and enables EVE's stored startup configs. It does not change
+the guest's current configuration or erase its existing writable state. To boot
+the nodes from the backup instead:
+
+```sh
+eve restore palo-lab --from labs/palo-lab/configs/backups/<UTC-timestamp> --wipe
+eve start palo-lab
+```
+
+**`--wipe` erases the writable VM state of the restored nodes.** A configuration
+backup does not preserve other disk contents. Restore requires those nodes to be
+stopped and does not stop or start them automatically. Every upload is read back
+and verified before any wipe. `--check`, including with `--wipe`, previews the
+mapping and actions without changing the server; running nodes are shown in the
+preview but must be stopped before executing restore.
+
+For a new lab, create its nodes with `eve apply <lab>` first, then restore with
+`--wipe` and start it. Files map by exact node name, so remote node IDs may differ
+from the backup. Templates, images, and Ethernet counts must match; older backups
+without image/interface metadata produce compatibility warnings. Missing nodes or
+mismatches fail before uploads. Nodes without advertised startup-config support
+are reported and skipped, including Palo Alto when unsupported by the host.
+
+This uses the Community web/API credentials in `.env`. Paths are absolute or
+relative to the current working directory. Restore overwrites stored startup
+configs for matched nodes; partial failures report completed actions without
+rollback. Live restore behavior on this host remains unverified while it is offline.
 
 ### pnet1 Internet NAT through pnet0
 

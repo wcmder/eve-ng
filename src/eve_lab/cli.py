@@ -9,6 +9,8 @@ from urllib.parse import quote
 import yaml
 
 from .client import EveClient
+from .backup import backup
+from .restore import restore
 from .config import load_server
 from .nat import configure as configure_nat
 from .securecrt import generate as generate_securecrt
@@ -44,11 +46,17 @@ def main():
     credential_options.add_argument("--username", help="Device SSH username (default: blank)")
     securecrt.add_argument("--interactive", action="store_true", help="Prompt for each session name")
     securecrt.add_argument("--port", type=int, default=22, help="Device SSH port (default: 22)")
-    for name in ("plan", "status", "templates", "template", "apply", "start", "stop", "delete"):
+    for name in ("plan", "status", "templates", "template", "apply", "start", "stop", "delete", "backup", "restore"):
         command = commands.add_parser(name)
         command.add_argument("--server", default="default")
-        if name in ("plan", "apply", "start", "stop", "delete"):
+        if name in ("plan", "apply", "start", "stop", "delete", "backup", "restore"):
             command.add_argument("lab")
+        if name == "restore":
+            command.add_argument("--from", dest="backup_source", type=Path, required=True, help="Backup directory containing manifest.json (relative to working directory or absolute)")
+            command.add_argument("--check", action="store_true", help="Validate files and preview node mapping without changing the server")
+            command.add_argument("--wipe", action="store_true", help="After verified uploads, erase restored nodes' writable state to initialize from startup configs; nodes must be stopped")
+        if name == "backup":
+            command.add_argument("--check", action="store_true", help="Check server export support without exporting or saving files")
         if name == "delete":
             command.description = "Stop all remote nodes and permanently delete the entire remote lab. Local files are kept."
         if name == "apply":
@@ -79,8 +87,8 @@ def main():
                       else clear_dhcp(server, args.interface, args.dry_run))
             print(json.dumps(result, indent=2))
             return
-        if args.command == "stop":
-            topology = load_lab_target(args.root, args.lab, args.remote_folder)
+        if args.command in ("stop", "backup", "restore"):
+            topology = load_lab_target(args.root, args.lab, getattr(args, "remote_folder", None))
         else:
             topology = load_topology(args.root, args.lab) if getattr(args, "lab", None) else None
         if args.command == "plan":
@@ -91,6 +99,10 @@ def main():
             try:
                 if args.command == "apply":
                     result = apply(client, topology, prune=args.prune)
+                elif args.command == "restore":
+                    result = restore(client, topology, args.backup_source, check=args.check, wipe=args.wipe)
+                elif args.command == "backup":
+                    result = backup(client, topology, args.root, check=args.check)
                 elif args.command == "delete":
                     result = delete(client, topology)
                 elif args.command in ("start", "stop"):
@@ -110,6 +122,8 @@ def main():
                 except RuntimeError as error:
                     print(f"Logout warning: {error}", file=sys.stderr)
         print(json.dumps(result, indent=2))
+        if args.command == "backup" and result["failed"]:
+            sys.exit(1)
     except (OSError, ValueError, RuntimeError, yaml.YAMLError) as error:
         parser.exit(1, f"Error: {error}\n")
 

@@ -8,3 +8,6 @@ __pycache__/
 build/
 dist/
 .DS_Store
+
+# Device configuration backups may include secrets.
+labs/*/configs/backups/
