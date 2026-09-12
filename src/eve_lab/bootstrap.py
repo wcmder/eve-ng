@@ -22,7 +22,7 @@ REMOTE_BOOTSTRAP_ROOT = '/opt/unetlab/addons/qemu/.eve-bootstrap'
 
 def without_managed_cdrom(options):
     pattern = (r' -drive file=/opt/unetlab/(?:bootstrap|addons/qemu/\.eve-bootstrap)/'
-               r'[a-f0-9]{24}/[0-9]{8}T[0-9]{12}Z/cdrom\.iso,media=cdrom,if=ide,readonly=on')
+               r'[a-f0-9]{24}/[0-9]{8}T[0-9]{12}Z/cdrom\.iso,media=cdrom,if=ide,(?:index=2,)?readonly=on(?=\s|$)')
     base, count = re.subn(pattern, '', options)
     if count > 1 or '-cdrom' in base or 'media=cdrom' in base:
         raise ValueError('Node has unrecognized CD-ROM options; inspect before changing bootstrap media')
@@ -109,7 +109,9 @@ def prepare(client, topology, root, server_name, node_name, check=False, attach=
     scope = hashlib.sha256((server['url'] + '/' + path + '/' + node['id']).encode()).hexdigest()[:24]
     remote = REMOTE_BOOTSTRAP_ROOT + '/' + scope + '/' + stamp
     iso = remote + '/cdrom.iso'
-    updated = base_options + ' -drive file=' + iso + ',media=cdrom,if=ide,readonly=on'
+    # Use QEMU's default CD-ROM slot. Without index=2 QEMU also creates an
+    # empty IDE CD-ROM; PAN-OS mounts only /dev/cdrom during media detection.
+    updated = base_options + ' -drive file=' + iso + ',media=cdrom,if=ide,index=2,readonly=on'
     result.update({'directory': str(local.resolve()), 'remote_iso': iso,
                    'previous_qemu_options': options, 'proposed_qemu_options': updated})
     manifest = local / 'manifest.json'

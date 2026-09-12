@@ -81,7 +81,7 @@ class BootstrapTests(unittest.TestCase):
         result = self.run_prepare(attach=True)
         self.assertTrue(result['attached'])
         self.assertTrue(self.detail['qemu_options'].startswith(result['previous_qemu_options']))
-        self.assertIn('media=cdrom,if=ide,readonly=on', self.detail['qemu_options'])
+        self.assertIn('media=cdrom,if=ide,index=2,readonly=on', self.detail['qemu_options'])
         self.assertTrue(result['remote_iso'].startswith('/opt/unetlab/addons/qemu/.eve-bootstrap/'))
         self.assertNotIn('/paloalto-11.2.', result['remote_iso'])
         manifest = Path(result['directory']) / 'manifest.json'
@@ -94,5 +94,8 @@ class BootstrapTests(unittest.TestCase):
         for root in ('/opt/unetlab/bootstrap', '/opt/unetlab/addons/qemu/.eve-bootstrap'):
             options = base + ' -drive file=' + root + '/092e776f40d9d400471bf4d1/20260912T171448666377Z/cdrom.iso,media=cdrom,if=ide,readonly=on'
             self.assertEqual(without_managed_cdrom(options), base)
+            self.assertEqual(without_managed_cdrom(options.replace('if=ide,', 'if=ide,index=2,')), base)
+            with self.assertRaises(ValueError):
+                without_managed_cdrom(options.replace('if=ide,', 'if=ide,index=1,'))
         with self.assertRaises(ValueError):
             without_managed_cdrom(base + ' -drive file=/someone/else.iso,media=cdrom')

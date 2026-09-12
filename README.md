@@ -356,7 +356,9 @@ ISO copy; generated files and hashes are gitignored. The shared base image folde
 is not modified, so other Palo VMs do not inherit the bootstrap settings.
 
 `--attach` adds a read-only IDE CD-ROM to that node's QEMU options via the API,
-preserving its existing options and verifying the saved value. It refuses running
+using `index=2` so QEMU does not create a second empty CD-ROM. PAN-OS bootstrap
+mounts `/dev/cdrom`, so avoiding multiple drives removes ambiguity about which
+media it reads. The command preserves existing options and verifies the saved value. It refuses running
 nodes or nodes with unrecognized CD-ROM options. Existing attachments generated
 by this command are replaced, including older paths outside the QEMU jail.
 It never stops, wipes, starts, or
