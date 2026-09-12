@@ -216,6 +216,12 @@ uses the host SSH connection to access those consoles. VNC nodes are skipped wit
 a reason; console initialization requires a working Telnet serial console. You do
 not need to specify a port or management IP. Start the lab first; init refuses
 stopped target nodes and waits for boot/login prompts on running nodes. Devices
+receive an Enter every 10 seconds during Cisco's initial prompt discovery, in case
+the first Enter arrived before Telnet or boot was ready. Once authentication begins,
+these extra Enter presses stop. Long waits report progress every 30 seconds without
+printing console contents. If it remains stuck, cancel with Ctrl+C and inspect
+the device console for a setup prompt that needs manual input.
+Devices
 are processed sequentially. `--check` uses only the API and local files, without
 logging into devices or applying changes.
 
@@ -225,6 +231,15 @@ hostname. Edit them to add your desired device configuration before running init
 Missing files and unsupported templates print a skip reason. Validation errors
 stop before console changes; device failures are reported individually and cause
 a nonzero exit status. Successful earlier changes are not rolled back.
+
+After saving Cisco initialization, the result includes `interface_status`, keyed
+by node name, from `show ip interface brief`. Every listed interface includes
+`interface`, `ip_address`, `method` (such as `DHCP`), `status`, and `protocol`.
+Unassigned interfaces are omitted; if none have an IP, the list is empty. This
+reads current primary IPv4 addresses; it does not
+renew leases or wait for DHCP. If reporting fails, init remains completed and a
+warning is returned. Interface IP reporting is currently Cisco-only and is not
+performed by `--check`.
 
 - **c8000v:** configuration-mode IOS XE commands; uses `CISCO_*` credentials,
   provisions the local privilege-15 account and VTY SSH login, then saves with
@@ -252,6 +267,13 @@ CISCO_USERNAME=admin
 CISCO_PASSWORD=<device-password>
 CISCO_ENABLE_SECRET=<enable-password>
 ```
+
+On a fresh Cisco boot, init answers `Enter enable secret:` and `Confirm enable
+secret:` using `CISCO_ENABLE_SECRET`. It selects `2` at `Enter your selection [2]:`
+to save the initial configuration and continue to the CLI. If the device repeats
+a secret prompt, init stops with a password-policy/confirmation error instead of
+retrying the same value indefinitely. Secret values are never printed. See
+[Cisco initial boot security](https://www.cisco.com/c/en/us/td/docs/routers/ir8340/software/configuration/b_ir8340_cg_17-14/m_overview.pdf).
 
 Device credentials are separate from `EVE_SSH_USERNAME` / `EVE_SSH_PASSWORD`.
 The connection goes over SSH to the EVE host and then through its local Telnet
@@ -494,6 +516,28 @@ The DHCP helper requires root access.
 Use `--server <name>`
 to select a server. Only the inspected, dedicated pnet1 dnsmasq configuration is
 supported; unexpected service/configuration layouts are rejected.
+
+### Replace the saved SSH key after rebuilding the EVE VM
+
+When you rebuild or replace the EVE VM at `10.0.4.4`, its SSH host key may change.
+After confirming the replacement was intentional, run these commands on your Mac:
+
+```sh
+ssh-keygen -R 10.0.4.4
+ssh -o StrictHostKeyChecking=accept-new root@10.0.4.4
+```
+
+The first command removes the old saved key. The second automatically trusts the
+new key and prompts for the EVE host's SSH password. Exit the SSH session, then
+retry your command, for example:
+
+```sh
+eve init palo-lab --node c8kv-0
+```
+
+Repeat these steps after future intentional VM replacements. `accept-new` still
+rejects changed keys when an existing entry is present; it does not disable host
+key checking. Update `.env` if the rebuilt VM also has a different SSH password.
 
 ### Deployment errors
 

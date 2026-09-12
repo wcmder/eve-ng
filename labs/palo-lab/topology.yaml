@@ -39,6 +39,10 @@ links:
     interface: GigabitEthernet8
     network: mgmt
 
+  - node: c8kv-a
+    interface: GigabitEthernet4
+    network: mgmt
+
   - node: pa-a
     interface: mgmt
     network: mgmt

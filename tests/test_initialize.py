@@ -1,6 +1,7 @@
 import tempfile
 from pathlib import Path
 import unittest
+import paramiko
 from unittest.mock import MagicMock, patch
 
 from eve_lab.initialize import initialize, PaloConsole, config_commands
@@ -60,18 +61,42 @@ class InitTests(unittest.TestCase):
     @patch('eve_lab.initialize.credentials', return_value=['admin', 'testpass', 'testenable'])
     @patch('eve_lab.initialize.load_server', return_value={'url': 'http://10.0.4.4', 'ssh_username': 'root', 'ssh_password': 'test'})
     def test_execution_uses_api_port_and_credentials(self, server, creds, ssh, console):
+        console.return_value.interface_status.return_value = [{'interface': 'GigabitEthernet8', 'ip_address': '172.16.1.20'}]
         result = self.run_init(timeout=900)
         channel = ssh.return_value.get_transport.return_value.open_session.return_value
         channel.exec_command.assert_called_once_with('telnet 127.0.0.1 32775')
         console.assert_called_once_with(channel, boot_timeout=900)
         console.return_value.initialize.assert_called_once_with(['hostname R0'], username='admin', password='testpass')
         self.assertEqual(result['completed'], ['R0'])
+        self.assertEqual(result['interface_status']['R0'][0]['ip_address'], '172.16.1.20')
         channel.close.assert_called_once()
+        console.return_value.interface_status.side_effect = RuntimeError('read failed')
+        result = self.run_init()
+        self.assertEqual(result['completed'], ['R0'])
+        self.assertEqual(result['failed'], [])
+        self.assertIn('saved successfully', result['warnings'][0]['reason'])
 
     def test_palo_accepts_only_config_commands(self):
         path = self.base / 'PA-init.cfg'
         path.write_text('set deviceconfig system hostname PA\ncommit\n')
         with self.assertRaises(ValueError): config_commands(path, 'paloalto')
+
+    @patch('eve_lab.initialize.paramiko.SSHClient')
+    @patch('eve_lab.initialize.credentials', return_value=['admin', 'testpass', 'testenable'])
+    @patch('eve_lab.initialize.load_server', return_value={'url': 'http://10.0.4.4', 'ssh_username': 'root', 'ssh_password': 'test'})
+    def test_ssh_failures_identify_cause_without_opening_console(self, server, creds, ssh):
+        for error, message in [
+            (paramiko.BadHostKeyException('10.0.4.4', MagicMock(), MagicMock()), 'key has changed'),
+            (paramiko.AuthenticationException('failed'), 'authentication failed'),
+            (paramiko.SSHException("Server not found in known_hosts"), 'not trusted yet'),
+            (paramiko.SSHException('negotiation failed'), 'handshake failed'),
+            (TimeoutError(), 'TCP port 22'),
+        ]:
+            with self.subTest(message=message):
+                ssh.return_value.connect.side_effect = error
+                with self.assertRaisesRegex(RuntimeError, message):
+                    self.run_init()
+                ssh.return_value.get_transport.assert_not_called()
 
     def test_palo_does_not_claim_failed_commit_success(self):
         c = PaloConsole(MagicMock(), boot_timeout=600)

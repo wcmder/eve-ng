@@ -1,10 +1,12 @@
 """Cisco IOS XE console initialization and backup over the EVE host's SSH."""
 import argparse
+from ipaddress import IPv4Address
 from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import re
+import sys
 import time
 from urllib.parse import urlsplit
 
@@ -18,44 +20,82 @@ class Console:
         self.channel = channel
         self.prompt = None
         self.boot_timeout = boot_timeout
+        self.pending = ''
 
     def send(self, line):
         self.channel.sendall(line + '\r')
 
-    def expect(self, pattern, timeout=60):
-        data = ''
-        deadline = time.monotonic() + timeout
+    def expect(self, pattern, timeout=60, wake=False):
+        data, self.pending = self.pending, ''
+        started = time.monotonic()
+        deadline = started + timeout
+        next_wake = started + 10
+        next_progress = started + 30
         while time.monotonic() < deadline:
+            # Remove terminal color/cursor controls before recognizing prompts.
+            clean = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', data)
+            match = re.search(pattern, clean, re.M)
+            if match:
+                self.pending = clean[match.end():]
+                return clean[:match.end()], match
+            now = time.monotonic()
+            if wake and now >= next_wake:
+                self.send('')
+                next_wake = now + 10
+            if now >= next_progress:
+                print(f'Still waiting for console prompt ({int(now - started)}s elapsed); '
+                      'Ctrl+C cancels. No console contents are logged.', file=sys.stderr, flush=True)
+                next_progress = now + 30
             if self.channel.recv_ready():
                 chunk = self.channel.recv(65536)
                 if not chunk:
                     raise RuntimeError('Console closed')
                 data += chunk.decode('utf-8', errors='replace').replace('\r', '')
-                match = re.search(pattern, data, re.M)
-                if match:
-                    return data, match
             elif self.channel.closed or self.channel.exit_status_ready():
                 raise RuntimeError('Console connection ended')
             else:
                 time.sleep(.05)
         # Never include console output: it may contain passwords/configuration.
-        raise RuntimeError('Timed out waiting for Cisco console prompt')
+        raise RuntimeError('Timed out waiting for console prompt; inspect the EVE console for boot progress or an interactive setup prompt')
 
     def login(self, username, password, secret):
         self.send('')
-        pattern = r'Username:\s*$|Password:\s*$|Would you like to enter[^\n]*[?:]\s*$|Press RETURN to get started[^\n]*$|^[\w.()/:-]+[>#]\s*$'
+        wake = True
+        secret_prompts = set()
+        pattern = (r'(?i:Enter enable secret|Confirm enable secret)\s*:\s*$|'
+                   r'Enter your selection\s*\[2\]\s*:\s*$|'
+                   r'Username:\s*$|Password:\s*$|Would you like to enter[^\n]*[?:]\s*$|'
+                   r'Press RETURN to get started[^\n]*$|^[\w.()/:-]+[>#]\s*$')
         for _ in range(12):
-            _, match = self.expect(pattern, timeout=self.boot_timeout)
+            _, match = self.expect(pattern, timeout=self.boot_timeout, wake=wake)
             prompt = match.group().strip()
-            if prompt.startswith('Username:'):
+            if re.match(r'(Enter|Confirm) enable secret', prompt, re.I):
+                stage = prompt.split()[0].lower()
+                if stage in secret_prompts:
+                    raise RuntimeError('Initial enable secret was rejected or confirmation failed; '
+                                       'check CISCO_ENABLE_SECRET against the device password policy')
+                if not secret or any(ord(char) < 32 or ord(char) == 127 for char in secret):
+                    raise ValueError('CISCO_ENABLE_SECRET must be nonempty without control characters')
+                secret_prompts.add(stage)
+                wake = False
+                print('Answering initial enable-secret ' + ('confirmation' if stage == 'confirm' else 'prompt') +
+                      ' using CISCO_ENABLE_SECRET.', file=sys.stderr, flush=True)
+                self.send(secret)
+            elif prompt.startswith('Enter your selection'):
+                wake = False
+                self.send('2')  # Save the initial secret to NVRAM and exit setup.
+            elif prompt.startswith('Username:'):
                 self.send(username)
+                wake = False
             elif prompt.startswith('Password:'):
                 self.send(password)
+                wake = False
             elif prompt.startswith('Would you like'):
                 self.send('no')
             elif prompt.startswith('Press RETURN'):
                 self.send('')
             elif prompt.endswith('>'):
+                wake = False
                 self.send('enable')
                 _, enabled = self.expect(r'Password:\s*$|^[\w.()/:-]+#\s*$')
                 if enabled.group().strip().startswith('Password:'):
@@ -110,6 +150,25 @@ class Console:
         if not re.search(r'^end\s*$', config, re.M):
             raise RuntimeError('Incomplete running configuration; backup not saved')
         return config
+
+    def interface_status(self):
+        """Read current primary IPv4 addresses without requesting DHCP leases."""
+        self.command('terminal length 0')
+        output = self.command('show ip interface brief')
+        if not re.search(r'Interface\s+IP-Address\s+OK\?\s+Method\s+Status\s+Protocol', output):
+            raise RuntimeError('Unrecognized interface status response')
+        interfaces = []
+        for line in output.splitlines():
+            match = re.fullmatch(r'\s*(\S+)\s+(unassigned|\d+\.\d+\.\d+\.\d+)\s+(?:YES|NO)\s+(\S+)\s+(.+?)\s+(\S+)\s*', line)
+            if not match:
+                continue
+            name, address, method, status, protocol = match.groups()
+            interfaces.append({'interface': name,
+                               'ip_address': None if address == 'unassigned' else str(IPv4Address(address)),
+                               'method': method, 'status': status, 'protocol': protocol})
+        if not interfaces:
+            raise RuntimeError('No interfaces found in status response')
+        return [interface for interface in interfaces if interface['ip_address'] is not None]
 
 
 def credentials(root, prefix='CISCO'):

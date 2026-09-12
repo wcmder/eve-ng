@@ -72,7 +72,8 @@ def initialize(client, topology, root, server_name, node_name=None, check=False,
         if node_name not in nodes:
             raise ValueError('Node not found: ' + node_name)
         nodes = {node_name: nodes[node_name]}
-    result = {'lab': topology['name'], 'check': check, 'planned': [], 'completed': [], 'skipped': [], 'failed': []}
+    result = {'lab': topology['name'], 'check': check, 'planned': [], 'completed': [], 'skipped': [], 'failed': [],
+              'interface_status': {}, 'warnings': []}
     pending = []
     base = (Path(root) / 'labs' / topology['name'] / 'configs').resolve()
     for name, node in nodes.items():
@@ -125,6 +126,14 @@ def initialize(client, topology, root, server_name, node_name=None, check=False,
                 print('Applying init to ' + name + '...', file=sys.stderr, flush=True)
                 console.initialize(commands, username=login[0], password=login[1])
                 result['completed'].append(name)
+                if template == 'c8000v':
+                    try:
+                        result['interface_status'][name] = console.interface_status()
+                    except (RuntimeError, ValueError, OSError, paramiko.SSHException):
+                        result['warnings'].append({'node': name, 'reason':
+                            'Init saved successfully, but interface status could not be read; inspect show ip interface brief'})
+                else:
+                    result['warnings'].append({'node': name, 'reason': 'Interface IP reporting is currently supported for c8000v only'})
             except RuntimeError as error:
                 result['failed'].append({'node': name, 'reason': str(error)})
                 print(f'Failed {name}: {error}; partial changes may remain', file=sys.stderr)
@@ -133,8 +142,23 @@ def initialize(client, topology, root, server_name, node_name=None, check=False,
             finally:
                 if channel is not None:
                     channel.close()
-    except (OSError, paramiko.SSHException):
-        raise RuntimeError('EVE host SSH failed; check SSH credentials and trusted host key') from None
+    except paramiko.BadHostKeyException:
+        raise RuntimeError(
+            'EVE host SSH key has changed and does not match known_hosts. '
+            'Verify the host key through a trusted server console before replacing the saved key; '
+            'SSH password authentication has not been attempted') from None
+    except paramiko.AuthenticationException:
+        raise RuntimeError(
+            'EVE host SSH authentication failed; check EVE_SSH_USERNAME and '
+            'EVE_SSH_PASSWORD in .env (shell environment overrides .env)') from None
+    except paramiko.SSHException as error:
+        if 'not found in known_hosts' in str(error):
+            raise RuntimeError(
+                'EVE host SSH key is not trusted yet. Connect using ssh to the EVE host '
+                'and verify its fingerprint before accepting the key') from None
+        raise RuntimeError('EVE host SSH handshake failed; check the SSH service and supported algorithms') from None
+    except OSError:
+        raise RuntimeError('Cannot connect to EVE host SSH; check host reachability and TCP port 22') from None
     finally:
         ssh.close()
     return result
