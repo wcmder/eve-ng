@@ -12,6 +12,7 @@ from .client import EveClient
 from .backup import backup
 from .restore import restore
 from .initialize import initialize
+from .bootstrap import prepare as prepare_bootstrap
 from .config import load_server
 from .nat import configure as configure_nat
 from .securecrt import generate as generate_securecrt
@@ -47,13 +48,18 @@ def main():
     credential_options.add_argument("--username", help="Device SSH username (default: blank)")
     securecrt.add_argument("--interactive", action="store_true", help="Prompt for each session name")
     securecrt.add_argument("--port", type=int, default=22, help="Device SSH port (default: 22)")
-    for name in ("plan", "status", "templates", "template", "apply", "start", "stop", "delete", "backup", "restore", "init"):
+    for name in ("plan", "status", "templates", "template", "apply", "start", "stop", "delete", "backup", "restore", "init", "bootstrap"):
         command = commands.add_parser(name)
         command.add_argument("--server", default="default")
-        if name in ("plan", "apply", "start", "stop", "delete", "backup", "restore", "init"):
+        if name in ("plan", "apply", "start", "stop", "delete", "backup", "restore", "init", "bootstrap"):
             command.add_argument("lab")
+        if name == "bootstrap":
+            command.add_argument("--node", required=True, help="Palo Alto 11.2 node to prepare for a bootstrap test")
+            command.add_argument("--check", action="store_true", help="Read node state and validate bootstrap attachment prerequisites")
+            command.add_argument("--attach", action="store_true", help="Attach prepared media to the stopped node; never wipes or starts it")
         if name == "init":
             command.add_argument("--node", help="Initialize only this remote node")
+            command.add_argument("--management-ip", help="Palo management IPv4 address; requires --node (overrides lab init.yaml)")
             command.add_argument("--check", action="store_true", help="Preview config files and API console mapping without console access")
             command.add_argument("--timeout", type=int, default=600, help="Boot prompt/commit wait in seconds (default: 600)")
         if name == "restore":
@@ -66,8 +72,11 @@ def main():
             command.description = "Stop all remote nodes and permanently delete the entire remote lab. Local files are kept."
         if name == "apply":
             command.add_argument("--prune", action=argparse.BooleanOptionalAction, default=True, help="Delete undeclared nodes, networks, and stale links (default: enabled); requires stopped nodes")
+        if name == "start":
+            command.add_argument("--node", help="Start only this remote node by exact name")
         if name == "stop":
             command.description = "Stop every node in the remote lab, regardless of local node/link edits."
+            command.add_argument("--node", help="Stop only this remote node by exact name")
             command.add_argument("--remote-folder", help="Remote folder; bypass reading topology.yaml (use / for root)")
         if name == "status":
             command.add_argument("lab", nargs="?", help="Omit for server status")
@@ -92,7 +101,7 @@ def main():
                       else clear_dhcp(server, args.interface, args.dry_run))
             print(json.dumps(result, indent=2))
             return
-        if args.command in ("stop", "backup", "restore", "init"):
+        if args.command in ("stop", "backup", "restore", "init", "bootstrap") or (args.command == "start" and args.node):
             topology = load_lab_target(args.root, args.lab, getattr(args, "remote_folder", None))
         else:
             topology = load_topology(args.root, args.lab) if getattr(args, "lab", None) else None
@@ -108,7 +117,9 @@ def main():
                 if args.command == "apply":
                     result = apply(client, topology, prune=args.prune)
                 elif args.command == "init":
-                    result = initialize(client, topology, args.root, args.server, args.node, args.check, args.timeout)
+                    result = initialize(client, topology, args.root, args.server, args.node, args.check, args.timeout, args.management_ip)
+                elif args.command == "bootstrap":
+                    result = prepare_bootstrap(client, topology, args.root, args.server, args.node, args.check, args.attach)
                 elif args.command == "restore":
                     result = restore(client, topology, args.backup_source, check=args.check, wipe=args.wipe)
                 elif args.command == "backup":
@@ -116,7 +127,7 @@ def main():
                 elif args.command == "delete":
                     result = delete(client, topology)
                 elif args.command in ("start", "stop"):
-                    result = lifecycle(client, topology, args.command)
+                    result = lifecycle(client, topology, args.command, node_name=getattr(args, 'node', None))
                 elif args.command == "status" and topology:
                     result = lab_status(client, topology)
                 else:

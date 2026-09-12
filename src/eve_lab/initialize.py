@@ -9,6 +9,7 @@ import paramiko
 from .config import load_server
 from .deploy import lab_path, named
 from .device_console import Console, credentials
+from .palo_ssh import management_targets, connect_palo
 
 
 class PaloConsole(Console):
@@ -39,6 +40,7 @@ class PaloConsole(Console):
         return output
 
     def initialize(self, commands, username=None, password=None):
+        self.command('set cli pager off')
         self.command('configure')
         for command in commands:
             self.command(command)
@@ -64,10 +66,13 @@ def config_commands(path, template):
     return commands
 
 
-def initialize(client, topology, root, server_name, node_name=None, check=False, timeout=600):
+def initialize(client, topology, root, server_name, node_name=None, check=False, timeout=600, management_ip=None):
     if not 1 <= timeout <= 3600:
         raise ValueError('--timeout must be between 1 and 3600 seconds')
     nodes = named(client, lab_path(topology) + '/nodes')
+    targets = management_targets(root, topology['name'], node_name, management_ip)
+    if management_ip and node_name in nodes and nodes[node_name].get('template') != 'paloalto':
+        raise ValueError('--management-ip currently supports Palo Alto nodes only')
     if node_name is not None:
         if node_name not in nodes:
             raise ValueError('Node not found: ' + node_name)
@@ -78,11 +83,14 @@ def initialize(client, topology, root, server_name, node_name=None, check=False,
     base = (Path(root) / 'labs' / topology['name'] / 'configs').resolve()
     for name, node in nodes.items():
         template = node.get('template')
+        address = targets.get(name) if template == 'paloalto' else None
         reason = None
         if template not in ('c8000v', 'paloalto'):
             reason = 'Unsupported init template: ' + str(template)
-        elif node.get('console') != 'telnet':
+        elif node.get('console') != 'telnet' and not address:
             reason = 'Console type ' + str(node.get('console')) + ' is unsupported; init requires a working Telnet serial console'
+            if template == 'paloalto':
+                reason += ' or a Palo management_ip in init.yaml/--management-ip'
         elif not re.fullmatch(r'[A-Za-z0-9_-][A-Za-z0-9_.-]*', name):
             reason = 'Node name is not a safe config filename'
         path = (base / (name + '-init.cfg')).resolve()
@@ -94,12 +102,14 @@ def initialize(client, topology, root, server_name, node_name=None, check=False,
             continue
         commands = config_commands(path, template)
         url = urlsplit(node.get('url', ''))
-        if node.get('console') != 'telnet' or url.scheme != 'telnet' or not url.port:
+        if not address and (node.get('console') != 'telnet' or url.scheme != 'telnet' or not url.port):
             raise ValueError('No Telnet console URL advertised for ' + name)
         if str(node.get('status')) == '0':
             raise ValueError('Start ' + name + ' with eve start before initialization')
-        result['planned'].append({'node': name, 'template': template, 'file': str(path), 'port': url.port})
-        pending.append((name, template, url.port, commands))
+        result['planned'].append({'node': name, 'template': template, 'file': str(path),
+                                  'transport': 'ssh' if address else 'telnet',
+                                  'management_ip': address, 'port': 22 if address else url.port})
+        pending.append((name, template, 22 if address else url.port, commands))
     if check or not pending:
         return result
     server = load_server(root, server_name, auth='ssh')
@@ -115,13 +125,17 @@ def initialize(client, topology, root, server_name, node_name=None, check=False,
                     allow_agent=False, look_for_keys=False)
         for name, template, port, commands in pending:
             channel = None
+            device = None
             print(f'Waiting for {name} console (up to {timeout}s per prompt)...', file=sys.stderr, flush=True)
             try:
-                channel = ssh.get_transport().open_session(timeout=10)
-                channel.get_pty(term='vt100', width=512, height=1000)
-                channel.exec_command('telnet 127.0.0.1 ' + str(port))
-                console = (PaloConsole if template == 'paloalto' else Console)(channel, boot_timeout=timeout)
                 login = logins[template]
+                if template == 'paloalto' and targets.get(name):
+                    device, channel = connect_palo(ssh, targets[name], login[0], login[1], timeout)
+                else:
+                    channel = ssh.get_transport().open_session(timeout=10)
+                    channel.get_pty(term='vt100', width=512, height=1000)
+                    channel.exec_command('telnet 127.0.0.1 ' + str(port))
+                console = (PaloConsole if template == 'paloalto' else Console)(channel, boot_timeout=timeout)
                 console.login(*login)
                 print('Applying init to ' + name + '...', file=sys.stderr, flush=True)
                 console.initialize(commands, username=login[0], password=login[1])
@@ -142,6 +156,8 @@ def initialize(client, topology, root, server_name, node_name=None, check=False,
             finally:
                 if channel is not None:
                     channel.close()
+                if device is not None:
+                    device.close()
     except paramiko.BadHostKeyException:
         raise RuntimeError(
             'EVE host SSH key has changed and does not match known_hosts. '

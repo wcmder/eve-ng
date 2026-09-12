@@ -513,6 +513,45 @@ class DeploymentTests(unittest.TestCase):
         self.assertTrue(all(node["status"] == 0 for node in self.client.nodes.values()))
         self.assertEqual(lifecycle(self.client, self.topology, "stop")["changed_nodes"], [])
 
+    def test_stop_selected_remote_node_leaves_others_running(self):
+        apply(self.client, self.topology)
+        self.client.nodes['1']['status'] = 2
+        self.client.nodes['2'] = {'name': 'PA1', 'status': 2}
+        self.topology['nodes'] = []
+        result = lifecycle(self.client, self.topology, 'stop', node_name='PA1')
+        self.assertEqual(result['changed_nodes'], ['PA1'])
+        self.assertEqual(self.client.nodes['1']['status'], 2)
+        self.assertEqual(self.client.nodes['2']['status'], 0)
+        self.assertEqual(lifecycle(self.client, self.topology, 'stop', node_name='PA1')['changed_nodes'], [])
+
+    def test_start_selected_remote_node_leaves_others_stopped(self):
+        apply(self.client, self.topology)
+        self.client.nodes['1']['status'] = 0
+        self.client.nodes['2'] = {'name': 'PA1', 'status': 0}
+        self.topology['nodes'] = [{'name': 'not-deployed'}]
+        result = lifecycle(self.client, self.topology, 'start', node_name='PA1')
+        self.assertEqual(result['changed_nodes'], ['PA1'])
+        self.assertEqual(self.client.nodes['1']['status'], 0)
+        self.assertEqual(self.client.nodes['2']['status'], 2)
+        self.assertEqual(lifecycle(self.client, self.topology, 'start', node_name='PA1')['changed_nodes'], [])
+
+    def test_start_missing_selected_node_does_not_start_others(self):
+        apply(self.client, self.topology)
+        self.client.nodes['1']['status'] = 0
+        with self.assertRaisesRegex(RuntimeError, 'Missing nodes'):
+            lifecycle(self.client, self.topology, 'start', node_name='missing')
+        self.assertEqual(self.client.nodes['1']['status'], 0)
+
+    def test_stop_selection_rejects_missing_or_duplicate_names(self):
+        apply(self.client, self.topology)
+        self.client.nodes['1']['status'] = 2
+        with self.assertRaisesRegex(ValueError, 'found 0'):
+            lifecycle(self.client, self.topology, 'stop', node_name='missing')
+        self.client.nodes['2'] = {'name': 'R1', 'status': 2}
+        with self.assertRaisesRegex(ValueError, 'found 2'):
+            lifecycle(self.client, self.topology, 'stop', node_name='R1')
+        self.assertTrue(all(n['status'] == 2 for n in self.client.nodes.values()))
+
     @patch("eve_lab.deploy.STOP_TIMEOUT", 0)
     def test_stop_continues_after_one_node_fails(self):
         apply(self.client, self.topology)

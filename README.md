@@ -22,11 +22,12 @@ Run from the repository root with the virtual environment activated:
 | --- | --- | --- |
 | `eve plan <lab>` | Validate the local YAML and summarize object counts. | No |
 | `eve apply <lab> [--no-prune]` | Apply the topology; prune undeclared nodes, networks, and stale links by default. | Yes |
-| `eve start <lab>` | Start the nodes declared in the YAML, skipping those already running. | Yes |
-| `eve stop <lab>` | Stop every node in the remote lab, skipping those already stopped. | Yes |
+| `eve start <lab> [--node <name>]` | Start YAML-declared nodes, or only the named remote node; skip nodes already running. | Yes |
+| `eve stop <lab> [--node <name>]` | Stop every remote node, or only the named node; skip nodes already stopped. | Yes |
 | `eve delete <lab>` | Stop all remote nodes and permanently delete the entire remote lab. | Yes |
 | `eve status [lab]` | Read server statistics, or a lab's nodes and networks when a lab is provided. | Yes |
 | `eve backup <lab> [--check]` | Export supported node configs through EVE-NG and save local backups; check reports support only. | Yes |
+| `eve bootstrap <lab> --node <name> [--check] [--attach]` | Prepare experimental Palo 11.2 first-boot ISO; optionally attach to a stopped node. Never wipes or starts it. | Yes |
 | `eve init <lab> [--node <name>] [--check] [--timeout 600]` | Discover console ports, wait for login, apply per-node init files and save/commit. | Yes |
 | `eve restore <lab> --from <backup-directory> [--check] [--wipe]` | Upload and enable saved startup configs; optionally wipe restored nodes for initialization. | Yes |
 | `eve templates` | List available device templates. | Yes |
@@ -115,6 +116,8 @@ verified; failures report completed operations and can leave partial changes.
 eve stop palo-lab
 # Bypass local YAML entirely, including missing or malformed files:
 eve stop palo-lab --remote-folder /
+eve stop palo-lab --node pa-a  # Stop only the firewall; routers keep running
+eve start palo-lab --node pa-a # Start only the firewall
 ```
 
 `stop` reads the remote node list and stops every active node, including nodes
@@ -212,8 +215,9 @@ eve init palo-lab --timeout 900  # Allow slower boots (seconds per login prompt/
 
 `eve init` discovers actual node names, templates and Telnet console ports through
 the EVE API, requesting native console URLs with `html5=0` during login, then
-uses the host SSH connection to access those consoles. VNC nodes are skipped with
-a reason; console initialization requires a working Telnet serial console. You do
+uses the host SSH connection to access those consoles. Palo nodes can instead use
+management SSH through the EVE host, as described below. VNC nodes without a
+management IP are skipped with a reason. You do
 not need to specify a port or management IP. Start the lab first; init refuses
 stopped target nodes and waits for boot/login prompts on running nodes. Devices
 receive an Enter every 10 seconds during Cisco's initial prompt discovery, in case
@@ -257,6 +261,113 @@ are unsupported. A login prompt does not guarantee every firewall service has
 finished booting; if PAN-OS rejects a command or commit, inspect the reported
 failure and retry after it is ready. Live validation remains pending while the
 EVE host is offline.
+
+### Palo Alto initialization over management SSH
+
+For factory-new VMs, see the bootstrap ISO workflow below; management SSH is for
+firewalls whose initial management access is already configured.
+
+For Palo VMs using VNC, `eve init` can open management SSH through the EVE host.
+The Mac does not need a direct route to the management subnet. Complete the
+one-time VNC setup first: log in, change the factory password, enable management
+SSH, and commit. Set `PALO_USERNAME` and `PALO_PASSWORD` in `.env` to the current
+firewall credentials. Verify the actual address using `show interface management`.
+A DHCP hostname alone does not reliably identify a specific lab node.
+
+From the firewall configuration prompt, management SSH can be enabled with:
+
+```text
+set deviceconfig system service disable-ssh no
+commit
+```
+
+From your Mac, verify and trust the firewall's SSH host key once (replace the IP):
+
+```sh
+ssh -J root@10.0.4.4 admin@172.16.1.134
+```
+
+This saves the firewall key in the Mac's known_hosts, which `eve init` also checks.
+EVE host credentials and firewall credentials are separate. Unknown or changed
+firewall keys are rejected; authentication failures do not trigger repeated login
+attempts. Connection failures while SSH starts are retried up to `--timeout`.
+
+```sh
+eve init palo-lab --node pa-a --management-ip 172.16.1.134 --check
+eve init palo-lab --node pa-a --management-ip 172.16.1.134
+```
+
+To retain the mapping for `eve init palo-lab`, create `labs/palo-lab/init.yaml`:
+
+```yaml
+pa-a:
+  management_ip: 172.16.1.134
+```
+
+Use your verified management IP; the address above is an example. Each firewall
+can have its own entry. `--management-ip` requires `--node` and overrides that
+node's saved mapping. `--check` previews the target but does not test SSH access.
+
+The firewall's `configs/pa-a-init.cfg` contains PAN-OS `set`/`delete` commands.
+Init logs in, disables paging, enters configuration mode, applies the file, and
+commits. It verifies commit success and exits configuration mode. Use a stable
+management address and avoid changing the active SSH access in this file, since
+losing the connection prevents commit verification. Initial factory password
+changes through VNC are not automated. This SSH path has local tests; live apply
+is pending completion of the firewall's first-login setup.
+
+References: [Palo management interface status](https://knowledgebase.paloaltonetworks.com/KCSArticleDetail?id=kA10g000000ClgiCAC),
+[Palo management services](https://knowledgebase.paloaltonetworks.com/KCSArticleDetail?id=kA10g000000CltrCAC).
+
+### Palo Alto first-boot bootstrap ISO (experimental)
+
+Palo bootstrap runs only at factory-default first boot. A power cycle of an
+already-initialized VM is insufficient. A fresh node or an explicitly approved
+reset of its writable state is required. The generated minimal PAN-OS 11.2 XML
+and admin password hash still require validation by booting the target image.
+
+```sh
+eve bootstrap palo-lab --node pa-a --check  # Read node state/options only
+eve bootstrap palo-lab --node pa-a          # Build ISO; leave VM unchanged
+# After stopping pa-a:
+eve bootstrap palo-lab --node pa-a --attach
+```
+
+Preparation uses `PALO_USERNAME` / `PALO_PASSWORD` from `.env`, local `openssl`,
+and `genisoimage` over EVE host SSH. It creates `config/init-cfg.txt` for management
+DHCP and `config/bootstrap.xml` for the administrator and SSH/HTTPS access.
+Both files set the hostname to the selected EVE node name, such as `pa-a`.
+Each invocation builds a separate ISO for that node; it is not one shared ISO
+for all firewalls. Previously generated ISOs must be rebuilt to include the
+hostname. An already-initialized guest does not reapply bootstrap just on reboot.
+Empty `content`, `software`, and `license` folders complete the package.
+No licenses or software updates are included. The admin password is hashed using
+the crypt format used by Palo's bootstrap example; it is not stored as plaintext.
+The current `*-init.cfg` commands are not translated into bootstrap XML; apply
+them later with `eve init` over management SSH.
+
+Each build creates a private timestamped directory in `.state/bootstrap/<lab>/<node>`
+and an isolated directory under `/opt/unetlab/addons/qemu/.eve-bootstrap` on EVE.
+The remote layout is `<scope>/<timestamp>/cdrom.iso`, where the scope identifies
+the server, lab path, and node ID. QEMU reads this host-side ISO as a virtual CD-ROM;
+the ISO is not copied into the guest's filesystem.
+This path is visible inside EVE's QEMU runtime jail. Both contain an
+ISO copy; generated files and hashes are gitignored. The shared base image folder
+is not modified, so other Palo VMs do not inherit the bootstrap settings.
+
+`--attach` adds a read-only IDE CD-ROM to that node's QEMU options via the API,
+preserving its existing options and verifying the saved value. It refuses running
+nodes or nodes with unrecognized CD-ROM options. Existing attachments generated
+by this command are replaced, including older paths outside the QEMU jail.
+It never stops, wipes, starts, or
+recreates a VM. The manifest records `previous_qemu_options` for restoring the
+original settings in EVE's node editor while the node is stopped. To rebuild an
+attached ISO, rerun with `--attach` while stopped; old build directories are
+retained. Keep the ISO available until the first-boot test completes.
+
+Sources: [Palo bootstrap requirements](https://docs.paloaltonetworks.com/vm-series/getting-started/bootstrap-the-vm-series-firewall/bootstrap-package),
+[KVM ISO attachment](https://docs.paloaltonetworks.com/vm-series/getting-started/bootstrap-the-vm-series-firewall/bootstrap-the-vm-series-firewall-on-kvm),
+[Palo's bootstrap XML example](https://github.com/PaloAltoNetworks/panos-bootstrapper/blob/master/bootstrapper/templates/import/bootstrap/bootstrap.xml).
 
 ### Cisco initialization credentials and configuration
 

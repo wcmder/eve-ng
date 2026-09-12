@@ -9,11 +9,15 @@ from .topology import expand_links, interface_key, validate
 STOP_TIMEOUT = 30
 
 
-def wait_for_stopped(client, path):
+def wait_for_stopped(client, path, targets=None):
     """EVE-NG may acknowledge stop before the VM process has exited."""
     deadline = time.monotonic() + STOP_TIMEOUT
     while True:
         nodes = indexed(client.request("GET", path + "/nodes"))
+        if targets is not None:
+            if any(ident not in nodes or nodes[ident].get('name') != name for ident, name in targets.items()):
+                raise RuntimeError('Selected node changed or disappeared while waiting for stop')
+            nodes = {ident: nodes[ident] for ident in targets}
         if all(str(node.get("status")) == "0" for node in nodes.values()):
             return nodes
         remaining = deadline - time.monotonic()
@@ -342,19 +346,20 @@ def start_node(client, path, node):
                 raise RuntimeError(f"Node {node['name']} has status {current.get('status')}; not retrying start") from error
 
 
-def lifecycle(client, topology, action):
+def lifecycle(client, topology, action, node_name=None):
     if action not in ("start", "stop"):
         raise ValueError(f"Unsupported action: {action}")
     if action == "stop":
-        return stop_all(client, topology)
+        return stop_all(client, topology, node_name=node_name)
     path = lab_path(topology)
     nodes = named(client, path + "/nodes")
-    missing = [node["name"] for node in topology["nodes"] if node["name"] not in nodes]
+    desired_nodes = [{"name": node_name}] if node_name is not None else topology["nodes"]
+    missing = [node["name"] for node in desired_nodes if node["name"] not in nodes]
     if missing:
         raise RuntimeError(f"Missing nodes: {missing}; run eve apply first")
     completed = []
     try:
-        for desired in topology["nodes"]:
+        for desired in desired_nodes:
             node = nodes[desired["name"]]
             if str(node.get("status")) == ("2" if action == "start" else "0"):
                 continue
@@ -365,9 +370,15 @@ def lifecycle(client, topology, action):
     return {"lab": topology["name"], "action": action, "changed_nodes": completed}
 
 
-def stop_all(client, topology):
+def stop_all(client, topology, node_name=None):
     path = lab_path(topology)
     nodes = indexed(client.request("GET", path + "/nodes"))
+    targets = None
+    if node_name is not None:
+        nodes = {ident: node for ident, node in nodes.items() if node.get('name') == node_name}
+        if len(nodes) != 1:
+            raise ValueError(f'Expected one remote node named {node_name}; found {len(nodes)}')
+        targets = {ident: node['name'] for ident, node in nodes.items()}
     requested, completed, failures = {}, [], []
     for ident, node in nodes.items():
         if str(node.get("status")) == "0":
@@ -378,7 +389,7 @@ def stop_all(client, topology):
         except RuntimeError as error:
             failures.append(f"{node['name']} (ID {ident}): {error}")
     try:
-        remaining = wait_for_stopped(client, path)
+        remaining = wait_for_stopped(client, path, targets=targets)
         completed = [name for ident, name in requested.items()
                      if ident in remaining and str(remaining[ident].get("status")) == "0"]
         active = [f"{node['name']} (ID {ident})" for ident, node in remaining.items()
