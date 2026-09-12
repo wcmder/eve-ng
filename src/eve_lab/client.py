@@ -50,8 +50,11 @@ class EveClient:
             raise EveAPIError(f"EVE-NG: {message}", result.get("code") if isinstance(result, dict) else None)
         return result.get("data")
 
-    def login(self, username: str, password: str):
-        self.request("POST", "auth/login", {"username": username, "password": password})
+    def login(self, username: str, password: str, html5=None):
+        payload = {"username": username, "password": password}
+        if html5 is not None:
+            payload["html5"] = "1" if html5 else "0"
+        self.request("POST", "auth/login", payload)
 
     def logout(self):
         self.request("GET", "auth/logout")

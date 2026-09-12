@@ -27,6 +27,7 @@ Run from the repository root with the virtual environment activated:
 | `eve delete <lab>` | Stop all remote nodes and permanently delete the entire remote lab. | Yes |
 | `eve status [lab]` | Read server statistics, or a lab's nodes and networks when a lab is provided. | Yes |
 | `eve backup <lab> [--check]` | Export supported node configs through EVE-NG and save local backups; check reports support only. | Yes |
+| `eve init <lab> [--node <name>] [--check] [--timeout 600]` | Discover console ports, wait for login, apply per-node init files and save/commit. | Yes |
 | `eve restore <lab> --from <backup-directory> [--check] [--wipe]` | Upload and enable saved startup configs; optionally wipe restored nodes for initialization. | Yes |
 | `eve templates` | List available device templates. | Yes |
 | `eve template <name>` | Fetch template details, image options, and server defaults. | Yes |
@@ -198,6 +199,98 @@ any node failed. An empty configuration is a failure. Failed exports never fall
 back to downloading an old stored configuration. If nothing was saved, results
 are printed but no backup directory is created. Palo Alto requires a separate
 device-native backup workflow when the server does not support its export.
+
+### Initialize devices after lab startup
+
+```sh
+eve start palo-lab
+eve init palo-lab --check        # Preview API console mapping and config files
+eve init palo-lab                # Wait for consoles, apply files, save/commit
+eve init palo-lab --node R0      # Initialize just one node
+eve init palo-lab --timeout 900  # Allow slower boots (seconds per login prompt/commit)
+```
+
+`eve init` discovers actual node names, templates and Telnet console ports through
+the EVE API, requesting native console URLs with `html5=0` during login, then
+uses the host SSH connection to access those consoles. VNC nodes are skipped with
+a reason; console initialization requires a working Telnet serial console. You do
+not need to specify a port or management IP. Start the lab first; init refuses
+stopped target nodes and waits for boot/login prompts on running nodes. Devices
+are processed sequentially. `--check` uses only the API and local files, without
+logging into devices or applying changes.
+
+Each node uses `labs/<lab>/configs/<exact-node-name>-init.cfg`. Starter files for
+this lab set R0's hostname and DHCP on GigabitEthernet8, R-A's hostname, and PA-A's
+hostname. Edit them to add your desired device configuration before running init.
+Missing files and unsupported templates print a skip reason. Validation errors
+stop before console changes; device failures are reported individually and cause
+a nonzero exit status. Successful earlier changes are not rolled back.
+
+- **c8000v:** configuration-mode IOS XE commands; uses `CISCO_*` credentials,
+  provisions the local privilege-15 account and VTY SSH login, then saves with
+  `write memory`. SSH key prerequisites are described below.
+- **paloalto:** configuration-mode `set`/`delete` commands; uses `PALO_USERNAME`
+  and `PALO_PASSWORD` from `.env`, enters `configure`, and checks the `commit`
+  result. It does not automatically provision/change firewall accounts. Complete
+  any mandatory first-login password change manually, commit it, and update `.env`
+  before using init. Avoid unrelated pending candidate changes, since commit
+  applies the candidate configuration.
+
+Initialization merges commands into the running device and can be invoked again;
+it does not wipe or reboot nodes. Interactive commands and multiline constructs
+are unsupported. A login prompt does not guarantee every firewall service has
+finished booting; if PAN-OS rejects a command or commit, inspect the reported
+failure and retry after it is ready. Live validation remains pending while the
+EVE host is offline.
+
+### Cisco initialization credentials and configuration
+
+`eve init` supports c8000v (IOS XE) and uses your device credentials from `.env`:
+
+```dotenv
+CISCO_USERNAME=admin
+CISCO_PASSWORD=<device-password>
+CISCO_ENABLE_SECRET=<enable-password>
+```
+
+Device credentials are separate from `EVE_SSH_USERNAME` / `EVE_SSH_PASSWORD`.
+The connection goes over SSH to the EVE host and then through its local Telnet
+console, so the router does not need a management IP. The host needs the `telnet`
+command and a verified SSH host key in your known_hosts file. The router must be
+running. Close other console sessions while using `eve init`.
+
+Create the init file with IOS XE configuration-mode commands, for example:
+
+```text
+hostname R0
+interface GigabitEthernet8
+ ip address dhcp
+ no shutdown
+exit
+```
+
+Init enters configuration mode, applies each command, and runs `write memory`.
+It merges changes into the current configuration; it does not wipe the router.
+After the file is applied, init also creates or updates the local user from
+`CISCO_USERNAME` / `CISCO_PASSWORD` with privilege 15 and configures VTY lines 0–4:
+
+```text
+username <CISCO_USERNAME> privilege 15 password 0 <CISCO_PASSWORD>
+line vty 0 4
+ login local
+ transport input ssh
+```
+
+The password is read from `.env` at runtime, not embedded in the script. These
+settings are saved by the same `write memory`. Existing console logins must accept
+the configured credentials; a fresh unauthenticated console is also supported.
+SSH additionally needs a reachable IP and RSA keys. For a fresh router, include
+`ip domain name lab.local` and `crypto key generate rsa modulus 2048` after your
+hostname in the init file, plus `ip ssh version 2`. Generate keys only on the
+first setup: replacing existing keys can prompt for confirmation, which this
+script does not handle. See [Cisco SSH configuration](https://www.cisco.com/c/en/us/td/docs/ios-xml/ios/sec_usr_ssh/configuration/xe-3s/sec-usr-ssh-xe-3s-book/sec-secure-shell-v2.html).
+Multiline banners/macros and interactive commands
+are not supported. On failure, earlier commands may already have changed the device.
 
 ### Restore or initialize from a backup
 

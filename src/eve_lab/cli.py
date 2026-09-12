@@ -11,6 +11,7 @@ import yaml
 from .client import EveClient
 from .backup import backup
 from .restore import restore
+from .initialize import initialize
 from .config import load_server
 from .nat import configure as configure_nat
 from .securecrt import generate as generate_securecrt
@@ -46,11 +47,15 @@ def main():
     credential_options.add_argument("--username", help="Device SSH username (default: blank)")
     securecrt.add_argument("--interactive", action="store_true", help="Prompt for each session name")
     securecrt.add_argument("--port", type=int, default=22, help="Device SSH port (default: 22)")
-    for name in ("plan", "status", "templates", "template", "apply", "start", "stop", "delete", "backup", "restore"):
+    for name in ("plan", "status", "templates", "template", "apply", "start", "stop", "delete", "backup", "restore", "init"):
         command = commands.add_parser(name)
         command.add_argument("--server", default="default")
-        if name in ("plan", "apply", "start", "stop", "delete", "backup", "restore"):
+        if name in ("plan", "apply", "start", "stop", "delete", "backup", "restore", "init"):
             command.add_argument("lab")
+        if name == "init":
+            command.add_argument("--node", help="Initialize only this remote node")
+            command.add_argument("--check", action="store_true", help="Preview config files and API console mapping without console access")
+            command.add_argument("--timeout", type=int, default=600, help="Boot prompt/commit wait in seconds (default: 600)")
         if name == "restore":
             command.add_argument("--from", dest="backup_source", type=Path, required=True, help="Backup directory containing manifest.json (relative to working directory or absolute)")
             command.add_argument("--check", action="store_true", help="Validate files and preview node mapping without changing the server")
@@ -87,7 +92,7 @@ def main():
                       else clear_dhcp(server, args.interface, args.dry_run))
             print(json.dumps(result, indent=2))
             return
-        if args.command in ("stop", "backup", "restore"):
+        if args.command in ("stop", "backup", "restore", "init"):
             topology = load_lab_target(args.root, args.lab, getattr(args, "remote_folder", None))
         else:
             topology = load_topology(args.root, args.lab) if getattr(args, "lab", None) else None
@@ -95,10 +100,15 @@ def main():
             result = plan(topology, server)
         else:
             client = EveClient(server["url"], server.get("timeout", 15))
-            client.login(server["username"], server["password"])
+            if args.command == "init":
+                client.login(server["username"], server["password"], html5=False)
+            else:
+                client.login(server["username"], server["password"])
             try:
                 if args.command == "apply":
                     result = apply(client, topology, prune=args.prune)
+                elif args.command == "init":
+                    result = initialize(client, topology, args.root, args.server, args.node, args.check, args.timeout)
                 elif args.command == "restore":
                     result = restore(client, topology, args.backup_source, check=args.check, wipe=args.wipe)
                 elif args.command == "backup":
@@ -122,7 +132,7 @@ def main():
                 except RuntimeError as error:
                     print(f"Logout warning: {error}", file=sys.stderr)
         print(json.dumps(result, indent=2))
-        if args.command == "backup" and result["failed"]:
+        if args.command in ("backup", "init") and result["failed"]:
             sys.exit(1)
     except (OSError, ValueError, RuntimeError, yaml.YAMLError) as error:
         parser.exit(1, f"Error: {error}\n")

@@ -4,7 +4,7 @@ remote_folder: /
 
 nodes:
 
-  - name: R0
+  - name: c8kv-0
     template: c8000v
     type: qemu
     image: c8000v-17.15.06
@@ -12,7 +12,7 @@ nodes:
     ethernet: 8
     ram: 8192
 
-  - name: R-A
+  - name: c8kv-a
     template: c8000v
     type: qemu
     image: c8000v-17.15.06
@@ -20,7 +20,7 @@ nodes:
     ethernet: 4
     ram: 8192
 
-  - name: PA-A
+  - name: pa-a
     template: paloalto
     type: qemu
     image: paloalto-11.2.10-h6
@@ -35,26 +35,26 @@ networks:
 
 links:
 
-  - node: R0
+  - node: c8kv-0
     interface: GigabitEthernet8
     network: mgmt
 
-  - node: PA-A
+  - node: pa-a
     interface: mgmt
     network: mgmt
 
-  - name: r0-pa-a
+  - name: c8kv0-paa
     from:
-      node: R0
+      node: c8kv-0
       interface: GigabitEthernet1
     to:
-      node: PA-A
+      node: pa-a
       interface: eth1/1
 
-  - name: ra-pa-a
+  - name: c8kva-paa
     from:
-      node: R-A
+      node: c8kv-a
       interface: GigabitEthernet1
     to:
-      node: PA-A
+      node: pa-a
       interface: eth1/2
