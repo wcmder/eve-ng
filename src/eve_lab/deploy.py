@@ -1,4 +1,4 @@
-"""Additive EVE-NG deployment and lab lifecycle operations."""
+"""Reconcile EVE-NG topology and manage lab lifecycle operations."""
 
 from urllib.parse import quote
 import time
@@ -60,8 +60,6 @@ def named(client, path):
 
 def check_settings(desired, actual):
     for key, value in desired.items():
-        if key in ("left", "top"):
-            continue  # Preserve manual canvas layout.
         if str(actual.get(key)) != str(value):
             raise RuntimeError(
                 f"Conflict on {desired['name']}.{key}: remote={actual.get(key)!r}, "
@@ -207,14 +205,22 @@ def apply(client, topology, prune=True):
     if not prune:
         check_direct_bridges(client, path, direct, nodes, networks)
     updates = []
+    network_updates = []
     shrinking = {}
     for kind, existing in (("nodes", nodes), ("networks", networks)):
         for desired in topology[kind]:
             if desired["name"] in existing:
                 actual = existing[desired["name"]]
-                resources = {key: desired[key] for key in ("cpu", "ram", "ethernet")
+                resources = {key: desired[key] for key in ("cpu", "ram", "ethernet", "console", "left", "top")
                              if kind == "nodes" and key in desired
                              and str(desired[key]) != str(actual.get(key))}
+                if kind == "networks":
+                    resources = {key: desired[key] for key in ("type", "left", "top")
+                                 if key in desired and str(desired[key]) != str(actual.get(key))}
+                    if resources:
+                        if any(str(node.get("status")) != "0" for node in nodes.values()):
+                            raise RuntimeError("Stop all nodes before changing network settings")
+                        network_updates.append((desired, actual["id"], resources))
                 check_settings({key: value for key, value in desired.items() if key not in resources}, actual)
                 if "ethernet" in resources and int(resources["ethernet"]) < int(actual["ethernet"]):
                     if not prune or actual.get("type") != "qemu":
@@ -229,9 +235,9 @@ def apply(client, topology, prune=True):
                             if port_id in removed:
                                 raise RuntimeError(f"YAML link uses removed interface {desired['name']} {link['interface']}; update the link before reducing Ethernet count")
                     shrinking[desired['name']] = removed
-                if resources:
+                if resources and kind == "nodes":
                     if str(actual.get("status")) != "0":
-                        raise RuntimeError(f"Stop {desired['name']} before changing CPU, RAM, or Ethernet interface count")
+                        raise RuntimeError(f"Stop {desired['name']} before changing node settings")
                     updates.append((desired, actual["id"], resources))
     growing = {desired["name"] for desired, _, resources in updates if "ethernet" in resources}
     for link in topology["links"]:
@@ -251,6 +257,16 @@ def apply(client, topology, prune=True):
                 "author": "eve", "description": topology.get("description", ""), "body": "",
             })
             changes.append("created lab")
+        for desired, ident, settings in network_updates:
+            if any(str(node.get("status")) != "0" for node in named(client, path + "/nodes").values()):
+                raise RuntimeError("Stop all nodes before changing network settings")
+            current = named(client, path + "/networks").get(desired["name"])
+            if not current or current["id"] != ident:
+                raise RuntimeError("Network changed during apply; retry")
+            client.request("PUT", f"{path}/networks/{ident}", {"name": desired["name"], **settings})
+            changes.append(f"updated network {desired['name']}: {settings}")
+            networks = named(client, path + "/networks")
+            check_settings(desired, networks[desired["name"]])
         for desired, ident, resources in updates:
             # Check again immediately before the write in case the node was started.
             current = named(client, path + "/nodes")[desired["name"]]

@@ -135,13 +135,15 @@ class PanoramaInitTests(unittest.TestCase):
     @patch('eve_lab.initialize.paramiko.SSHClient')
     @patch('eve_lab.initialize.credentials', return_value=['admin', 'new-secret'])
     @patch('eve_lab.initialize.load_server', return_value={'url': 'http://10.0.4.4', 'ssh_username': 'root', 'ssh_password': 'test'})
-    def test_execution_uses_console_and_applies_management_services(self, server, creds, ssh, console):
+    def test_execution_preserves_configured_hostname_and_services(self, server, creds, ssh, console):
+        configured = [NETWORK.strip(), 'set deviceconfig system hostname custom-panorama',
+                      'set deviceconfig system service disable-ssh yes']
+        self.config.write_text('\n'.join(configured))
         result = self.init()
         self.assertEqual(result['completed'], ['pano'])
         console.return_value.login.assert_called_once_with('admin', 'new-secret', auto_factory=True)
         commands = console.return_value.initialize.call_args.args[0]
-        self.assertIn('set deviceconfig system hostname pano', commands)
-        self.assertIn('set deviceconfig system service disable-ssh no', commands)
+        self.assertEqual(commands, configured)
         channel = ssh.return_value.get_transport.return_value.open_session.return_value
         channel.exec_command.assert_called_once_with('telnet 127.0.0.1 32772')
         channel.close.assert_called_once()

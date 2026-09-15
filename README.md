@@ -16,7 +16,9 @@ override `.env`. Server addresses belong in `config/servers.yaml`.
 
 ## Commands
 
-Run from the repository root with the virtual environment activated:
+Run from the repository root with the virtual environment activated. Examples
+using `palo-lab` are illustrative; the current checked-in lab is `palo-lab1`.
+Use your actual lab and node names:
 
 | Command | Purpose | Contacts EVE-NG? |
 | --- | --- | --- |
@@ -36,11 +38,14 @@ Run from the repository root with the virtual environment activated:
 | `eve nat status pnet1` | Show current NAT rules and managed pnet1 configuration state. | SSH |
 | `eve nat add pnet1 [--dry-run]` | Add runtime Internet NAT through pnet0. | SSH |
 | `eve nat remove pnet1 [--dry-run]` | Remove only the NAT rules managed by this command. | SSH |
+| `eve dhcp update dns [pnet1] [--dry-run]` | Update DHCP DNS servers from `.env`. | SSH |
 | `eve dhcp report pnet1` | List DHCP leases, addresses, hostnames, and expiration times. | SSH |
 | `eve dhcp clear pnet1 [--dry-run]` | Back up and clear pnet1 DHCP server leases over SSH. | SSH |
 
-All commands print JSON. Remote commands log in and log out using an in-memory
-session cookie. Discovery, status, and local plan commands do not modify devices.
+Successful commands print JSON results; progress, skip notices, and errors may
+also be printed. API commands log in and log out using an in-memory session
+cookie. DHCP, NAT, and SecureCRT generation use SSH; init and bootstrap use both
+the API and host SSH when applying changes. Discovery, status, and local plan commands do not modify devices.
 The current implementation loads server configuration and credentials even for
 `plan`. Starting a VM does not mean the guest OS has finished booting.
 
@@ -64,7 +69,7 @@ names and IDs; `GigabitEthernet1`, `Gi1`, and `g1` are equivalent spellings.
 `apply` does not start nodes or push guest device configurations from `configs/`.
 
 Reruns match objects by name within the remote lab and skip matching objects and
-connections. Explicit `cpu` and `ram` changes are applied to stopped nodes and
+connections. Explicit `cpu`, `ram`, `console`, `left`, and `top` changes are applied to stopped nodes and
 verified afterward; running nodes must be stopped first. Differences in other
 settings (such as image) still cause a conflict. Ethernet interface counts can
 be increased on stopped nodes. QEMU interface counts can also decrease with
@@ -74,7 +79,8 @@ does not replace conflicting object settings. With pruning enabled, stopped
 interfaces are rewired to match YAML. Deletion
 of undeclared nodes/networks and stale links is enabled by default.
 Use `--no-prune` to keep undeclared objects and connections.
-Manually adjusted canvas positions are preserved. Stop a node before
+Canvas positions are preserved when omitted from YAML; explicit positions are applied.
+Network type and explicit position changes are also applied, with all nodes stopped. Stop a node before
 adding a connection. Default pruning requires every remote node to be stopped. `start`
 acts only on declared nodes. `stop` acts on every remote node in the selected lab.
 Run one deployment at a time per remote lab.
@@ -107,7 +113,7 @@ Use `eve apply palo-lab --no-prune` for the previous additive behavior.
 All remote nodes must be stopped before pruning, including manually added nodes.
 Pruning executes without a prompt and includes manually created objects absent
 from YAML. Deleted node data is not backed up automatically. Local files and the
-remote lab itself remain. Without `--prune`, apply remains additive. Deletions are
+remote lab itself remain. With `--no-prune`, apply remains additive. Deletions are
 verified; failures report completed operations and can leave partial changes.
 
 ### Stop all nodes in a lab
@@ -217,7 +223,7 @@ eve init palo-lab --timeout 900  # Allow slower boots (seconds per login prompt/
 the EVE API, requesting native console URLs with `html5=0` during login, then
 uses the host SSH connection to access those consoles. Palo nodes can instead use
 management SSH through the EVE host, as described below. VNC nodes without a
-management IP are skipped with a reason. You do
+management IP are skipped with a reason. With a working Telnet console, you do
 not need to specify a port or management IP. Start the lab first; init refuses
 stopped target nodes and waits for boot/login prompts on running nodes. Devices
 receive an Enter every 10 seconds during Cisco's initial prompt discovery, in case
@@ -225,15 +231,15 @@ the first Enter arrived before Telnet or boot was ready. Once authentication beg
 these extra Enter presses stop. Long waits report progress every 30 seconds without
 printing console contents. If it remains stuck, cancel with Ctrl+C and inspect
 the device console for a setup prompt that needs manual input.
-Devices
-are processed sequentially. `--check` uses only the API and local files, without
+Devices are processed sequentially. `--check` uses only the API and local files, without
 logging into devices or applying changes.
 
-Each node uses `labs/<lab>/configs/<exact-node-name>-init.cfg`. Starter files for
-this lab set R0's hostname and DHCP on GigabitEthernet8, R-A's hostname, and PA-A's
-hostname. Edit them to add your desired device configuration before running init.
-Missing files and unsupported templates print a skip reason. Validation errors
-stop before console changes; device failures are reported individually and cause
+Each node uses `labs/<lab>/configs/<exact-node-name>-init.cfg`. Set the desired
+hostname and device configuration in that file. For Palo firewalls and Panorama,
+SSH/HTTPS service settings also come from the file; init does not append or
+override them. The config filename matches the EVE node name, even when the
+configured device hostname differs. Edit the file before running init.
+Missing files and unsupported templates print a skip reason. Topology, file, and management-network validation runs before device login; device failures are reported individually and cause
 a nonzero exit status. Successful earlier changes are not rolled back.
 
 After saving Cisco initialization, the result includes `interface_status`, keyed
@@ -249,29 +255,37 @@ performed by `--check`.
   provisions the local privilege-15 account and VTY SSH login, then saves with
   `write memory`. SSH key prerequisites are described below.
 - **paloalto:** configuration-mode `set`/`delete` commands; uses `PALO_USERNAME`
-  and `PALO_PASSWORD` from `.env`, enters `configure`, and checks the `commit`
-  result. It does not automatically provision/change firewall accounts. Complete
-  any mandatory first-login password change manually, commit it, and update `.env`
-  before using init. Avoid unrelated pending candidate changes, since commit
-  applies the candidate configuration.
+  and `PALO_PASSWORD` from `.env`. Serial init handles the initial administrator
+  password change, applies the `.cfg`, and verifies the commit. Management DHCP,
+  hostname, and SSH/HTTPS settings must be supplied in the `.cfg` when desired.
+- **panorama:** uses the same PAN-OS serial login and commit flow as firewalls.
+  Hostname and SSH/HTTPS settings come from the `.cfg`. The `PANORAMA_*` management
+  network settings in `.env` are appended after the file and take precedence
+  over its corresponding IP, netmask, gateway, and DNS settings.
+
+For both PAN-OS templates, serial login tries configured credentials first and,
+on an explicit authentication failure for `admin`, tries factory credentials
+once and handles the mandatory password change. SSH requires the configured
+credentials and already-working management access. Avoid unrelated pending
+candidate changes, since commit applies the candidate configuration.
 
 Initialization merges commands into the running device and can be invoked again;
 it does not wipe or reboot nodes. Interactive commands and multiline constructs
 are unsupported. A login prompt does not guarantee every firewall service has
 finished booting; if PAN-OS rejects a command or commit, inspect the reported
-failure and retry after it is ready. Live validation remains pending while the
-EVE host is offline.
+failure and retry after it is ready. Cisco and Panorama serial init have been
+tested live; the Palo firewall serial first-boot test is pending.
 
 ### Palo Alto initialization over management SSH
 
-For factory-new VMs, see the bootstrap ISO workflow below; management SSH is for
-firewalls whose initial management access is already configured.
+For factory-new VMs, use the serial-console or supported bootstrap ISO workflow
+below; management SSH requires initial management access to be configured.
 
-For Palo VMs using VNC, `eve init` can open management SSH through the EVE host.
-The Mac does not need a direct route to the management subnet. Complete the
-one-time VNC setup first: log in, change the factory password, enable management
-SSH, and commit. Set `PALO_USERNAME` and `PALO_PASSWORD` in `.env` to the current
-firewall credentials. Verify the actual address using `show interface management`.
+For Palo firewalls and Panorama, `eve init` can open management SSH through the EVE host.
+The Mac does not need a direct route to the management subnet. First configure
+the administrator password, management address, and SSH access through serial
+init, a supported firewall bootstrap ISO, or manual console setup, and commit.
+Set `PALO_USERNAME` and `PALO_PASSWORD` in `.env` to the current device credentials. Verify the actual address using `show interface management`.
 A DHCP hostname alone does not reliably identify a specific lab node.
 
 From the firewall configuration prompt, management SSH can be enabled with:
@@ -313,8 +327,8 @@ Init logs in, disables paging, enters configuration mode, applies the file, and
 commits. It verifies commit success and exits configuration mode. Use a stable
 management address and avoid changing the active SSH access in this file, since
 losing the connection prevents commit verification. Initial factory password
-changes through VNC are not automated. This SSH path has local tests; live apply
-is pending completion of the firewall's first-login setup.
+changes are not handled by the SSH path; use serial init or manual console setup.
+The SSH path is covered by local tests; live SSH init has not been confirmed.
 
 References: [Palo management interface status](https://knowledgebase.paloaltonetworks.com/KCSArticleDetail?id=kA10g000000ClgiCAC),
 [Palo management services](https://knowledgebase.paloaltonetworks.com/KCSArticleDetail?id=kA10g000000CltrCAC).
@@ -323,8 +337,9 @@ References: [Palo management interface status](https://knowledgebase.paloaltonet
 
 Palo bootstrap runs only at factory-default first boot. A power cycle of an
 already-initialized VM is insufficient. A fresh node or an explicitly approved
-reset of its writable state is required. The generated minimal PAN-OS 11.2 XML
-and admin password hash still require validation by booting the target image.
+reset of its writable state is required. The ISO generator currently accepts
+PAN-OS 11.2 images only; it does not support the lab's 12.1.7 firewall image. Use
+the serial-init workflow for that image.
 
 ```sh
 eve bootstrap palo-lab --node pa-a --check  # Read node state/options only
@@ -341,6 +356,38 @@ Each invocation builds a separate ISO for that node; it is not one shared ISO
 for all firewalls. Previously generated ISOs must be rebuilt to include the
 hostname. An already-initialized guest does not reapply bootstrap just on reboot.
 Empty `content`, `software`, and `license` folders complete the package.
+
+No licenses or software updates are included. The admin password is hashed using
+the crypt format used by Palo's bootstrap example; it is not stored as plaintext.
+The current `*-init.cfg` commands are not translated into bootstrap XML; apply
+them later with `eve init` over serial console or management SSH.
+
+Each build creates a private timestamped directory in `.state/bootstrap/<lab>/<node>`
+and an isolated directory under `/opt/unetlab/addons/qemu/.eve-bootstrap` on EVE.
+The remote layout is `<scope>/<timestamp>/cdrom.iso`, where the scope identifies
+the server, lab path, and node ID. QEMU reads this host-side ISO as a virtual CD-ROM;
+the ISO is not copied into the guest's filesystem.
+This path is visible inside EVE's QEMU runtime jail. Both directories contain an
+ISO copy; generated files and hashes are gitignored. The shared base image folder
+is not modified, so other Palo VMs do not inherit the bootstrap settings.
+
+`--attach` adds a read-only IDE CD-ROM to that node's QEMU options via the API,
+using `index=2` so QEMU does not create a second empty CD-ROM. PAN-OS bootstrap
+mounts `/dev/cdrom`, so avoiding multiple drives removes ambiguity about which
+media it reads. The command preserves existing options and verifies the saved value. It refuses running
+nodes or nodes with unrecognized CD-ROM options. Existing attachments generated
+by this command are replaced, including older paths outside the QEMU jail.
+It never stops, wipes, starts, or
+recreates a VM. The manifest records `previous_qemu_options` for restoring the
+original settings in EVE's node editor while the node is stopped. To rebuild an
+attached ISO, rerun with `--attach` while stopped; old build directories are
+retained. Keep the ISO available until the first-boot test completes.
+
+Sources: [Palo bootstrap requirements](https://docs.paloaltonetworks.com/vm-series/getting-started/bootstrap-the-vm-series-firewall/bootstrap-package),
+[KVM ISO attachment](https://docs.paloaltonetworks.com/vm-series/getting-started/bootstrap-the-vm-series-firewall/bootstrap-the-vm-series-firewall-on-kvm),
+[Palo's bootstrap XML example](https://github.com/PaloAltoNetworks/panos-bootstrapper/blob/master/bootstrapper/templates/import/bootstrap/bootstrap.xml).
+
+### Panorama and Palo firewall serial initialization
 
 Panorama is not supported by `eve bootstrap`. Read-only inspection of the
 `panorama-12.1.5` image found that its bootstrap sanity check requires an external
@@ -365,7 +412,10 @@ eve start palo-lab1 --node pano
 `--prepare-console` changes only the selected node's console type to `telnet` and
 verifies EVE saved it. It does not start, wipe, or initialize the device. For new
 nodes, `console: telnet` can instead be set under that node in `topology.yaml`.
-If YAML explicitly specifies `console: vnc`, update that field to match. Panorama serial initialization has been tested on 12.1.5. Firewall serial login
+If YAML explicitly specifies `console: vnc`, update that field to match. All nodes
+in the checked-in `palo-lab1` topology now specify `console: telnet`; existing VNC
+nodes can be updated by stopping the lab and running `eve apply palo-lab1`, or
+by using `--prepare-console` on a stopped node. Panorama serial initialization has been tested on 12.1.5. Firewall serial login
 is configured in the inspected 12.1.7 image; its live first-boot test is pending.
 
 Palo Alto firewall nodes also support `--prepare-console`:
@@ -393,11 +443,11 @@ set deviceconfig system service disable-https no
 This serial workflow does not require a bootstrap ISO. SSH initialization continues
 to require working management connectivity and the configured credentials.
 
-Set Panorama management networking in `.env`. The prepared address is outside
+Set Panorama management networking in `.env`. This example address is outside
 pnet1's current DHCP pool (`172.16.1.100`–`172.16.1.199`):
 
 ```dotenv
-PANORAMA_MANAGEMENT_IP=172.16.1.50
+PANORAMA_MANAGEMENT_IP=172.16.1.99
 PANORAMA_NETMASK=255.255.255.0
 PANORAMA_GATEWAY=172.16.1.1
 PANORAMA_DNS=1.1.1.1
@@ -407,8 +457,9 @@ All four values are required when any is set. Shell environment values override
 `.env`; these settings apply to the Panorama node being initialized. Assign a
 different address when initializing another Panorama. They override management
 network commands in `configs/<node>-init.cfg`. The prepared
-`labs/palo-lab1/configs/pano-init.cfg` is a comment-only file where optional
-additional configuration-mode `set`/`delete` commands can be added. IP values are
+`labs/palo-lab1/configs/pano-init.cfg` sets the hostname and management SSH/HTTPS access.
+Edit these configuration-mode `set`/`delete` commands as needed; init does not
+automatically override hostname or management service settings. IP values are
 validated before any device login; `.env` remains gitignored.
 
 Panorama's documented management interface does not support the VM-Series
@@ -424,13 +475,13 @@ eve init palo-lab1 --node pano --check
 eve init palo-lab1 --node pano --timeout 1800
 ```
 
-Panorama serial initialization automatically handles first-time setup. It tries
+Palo firewall and Panorama serial initialization automatically handle first-time setup. It tries
 the configured credentials first; if authentication explicitly fails for `admin`,
 it tries `admin/admin` once and handles the mandatory old/new/confirm password
 prompts using `PALO_PASSWORD`. An already-initialized device uses the configured
 credentials without a factory-password attempt. It does not reset the node. The command waits
-for prompts, applies the init file, sets the hostname to the EVE node name,
-enables management SSH/HTTPS, and commits. Success requires confirmation of the
+for prompts, applies the init file and management network settings from `.env`,
+and commits. Hostname and SSH/HTTPS settings come from the init file. Success requires confirmation of the
 commit; a failure may leave a changed password or candidate configuration.
 Repeated password-change prompts fail without logging secrets. If initialization
 fails after changing the password, the same command can be rerun using `.env` credentials.
@@ -441,36 +492,6 @@ SSH uses only the configured credentials and keeps device host-key verification;
 automatic factory-password handling is limited to the serial console.
 `--check` validates local
 files and advertised console settings without logging in to the device.
-No licenses or software updates are included. The admin password is hashed using
-the crypt format used by Palo's bootstrap example; it is not stored as plaintext.
-The current `*-init.cfg` commands are not translated into bootstrap XML; apply
-them later with `eve init` over management SSH.
-
-Each build creates a private timestamped directory in `.state/bootstrap/<lab>/<node>`
-and an isolated directory under `/opt/unetlab/addons/qemu/.eve-bootstrap` on EVE.
-The remote layout is `<scope>/<timestamp>/cdrom.iso`, where the scope identifies
-the server, lab path, and node ID. QEMU reads this host-side ISO as a virtual CD-ROM;
-the ISO is not copied into the guest's filesystem.
-This path is visible inside EVE's QEMU runtime jail. Both contain an
-ISO copy; generated files and hashes are gitignored. The shared base image folder
-is not modified, so other Palo VMs do not inherit the bootstrap settings.
-
-`--attach` adds a read-only IDE CD-ROM to that node's QEMU options via the API,
-using `index=2` so QEMU does not create a second empty CD-ROM. PAN-OS bootstrap
-mounts `/dev/cdrom`, so avoiding multiple drives removes ambiguity about which
-media it reads. The command preserves existing options and verifies the saved value. It refuses running
-nodes or nodes with unrecognized CD-ROM options. Existing attachments generated
-by this command are replaced, including older paths outside the QEMU jail.
-It never stops, wipes, starts, or
-recreates a VM. The manifest records `previous_qemu_options` for restoring the
-original settings in EVE's node editor while the node is stopped. To rebuild an
-attached ISO, rerun with `--attach` while stopped; old build directories are
-retained. Keep the ISO available until the first-boot test completes.
-
-Sources: [Palo bootstrap requirements](https://docs.paloaltonetworks.com/vm-series/getting-started/bootstrap-the-vm-series-firewall/bootstrap-package),
-[KVM ISO attachment](https://docs.paloaltonetworks.com/vm-series/getting-started/bootstrap-the-vm-series-firewall/bootstrap-the-vm-series-firewall-on-kvm),
-[Palo's bootstrap XML example](https://github.com/PaloAltoNetworks/panos-bootstrapper/blob/master/bootstrapper/templates/import/bootstrap/bootstrap.xml).
-
 ### Cisco initialization credentials and configuration
 
 `eve init` supports c8000v (IOS XE) and uses your device credentials from `.env`:
@@ -564,7 +585,7 @@ are reported and skipped, including Palo Alto when unsupported by the host.
 This uses the Community web/API credentials in `.env`. Paths are absolute or
 relative to the current working directory. Restore overwrites stored startup
 configs for matched nodes; partial failures report completed actions without
-rollback. Live restore behavior on this host remains unverified while it is offline.
+rollback. Live restore behavior on this host has not been verified.
 
 ### pnet1 Internet NAT through pnet0
 
@@ -752,8 +773,9 @@ These are the current server's credentials. After changing its SSH password,
 update `EVE_SSH_PASSWORD` in `.env`; the next DHCP command uses the new value.
 Shell environment variables override `.env`. Enter values without surrounding
 quotes. `config/servers.yaml` maps `ssh_username_env` and `ssh_password_env` to
-these variable names. DHCP commands require only the SSH credentials; lab commands
-use the web/API credentials.
+these variable names. DHCP commands require only the SSH credentials. Lab
+commands use web/API credentials; applying init or building bootstrap media also
+requires EVE host SSH credentials.
 
 SSH password authentication is automatic, without an interactive prompt or SSH
 agent/key authentication. Passwords are not passed as command-line arguments.
@@ -923,8 +945,8 @@ its generated bridge is not included in the declared network count.
 - `README.md`: shared command usage and notes for all labs.
 - `src/eve_lab/`: shared configuration, API client, topology validation, deployment, and CLI.
 - `config/servers.yaml`: named server connections.
-- `labs/palo-lab/`: first lab's definition and device configurations.
-- `.state/`: reserved for future generated state; deployment currently reads remote objects directly.
+- `labs/palo-lab1/`: current lab definition and device configurations.
+- `.state/`: generated bootstrap artifacts and SecureCRT import scripts; deployment reads remote objects directly.
 - `tests/`: deployment, validation, and API error tests using a simulated server.
 
 ## Verification

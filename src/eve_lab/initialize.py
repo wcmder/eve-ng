@@ -242,9 +242,6 @@ def initialize(client, topology, root, server_name, node_name=None, check=False,
             commands += panorama_network_commands(root)
             if not address:
                 validate_panorama_network(commands)
-            commands += ['set deviceconfig system hostname ' + name,
-                         'set deviceconfig system service disable-ssh no',
-                         'set deviceconfig system service disable-https no']
         url = urlsplit(node.get('url', ''))
         if not address and (node.get('console') != 'telnet' or url.scheme != 'telnet' or not url.port):
             raise ValueError('No Telnet console URL advertised for ' + name)

@@ -391,6 +391,35 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(apply(self.client, self.topology)["changes"], [])
         self.assertEqual(self.client.writes, [])
 
+    def test_apply_updates_console_and_explicit_positions(self):
+        apply(self.client, self.topology)
+        self.topology['nodes'][0].update(console='telnet', left=350, top=400)
+        self.client.writes.clear()
+        apply(self.client, self.topology)
+        self.assertEqual(self.client.writes, [('PUT', 'labs/palo-lab.unl/nodes/1',
+                         {'name': 'R1', 'console': 'telnet', 'left': 350, 'top': 400})])
+        self.client.writes.clear()
+        self.assertEqual(apply(self.client, self.topology)['changes'], [])
+
+    def test_apply_updates_network_settings(self):
+        apply(self.client, self.topology)
+        network = self.topology['networks'][0]
+        network.update(type='bridge', left=300, top=350)
+        apply(self.client, self.topology)
+        actual = next(iter(self.client.networks.values()))
+        for key in ('type', 'left', 'top'):
+            self.assertEqual(actual[key], network[key])
+        self.assertEqual(apply(self.client, self.topology)['changes'], [])
+
+    def test_running_console_change_rejected(self):
+        apply(self.client, self.topology)
+        self.client.nodes['1']['status'] = 2
+        self.topology['nodes'][0]['console'] = 'telnet'
+        self.client.writes.clear()
+        with self.assertRaisesRegex(RuntimeError, 'Stop R1'):
+            apply(self.client, self.topology, prune=False)
+        self.assertEqual(self.client.writes, [])
+
     def test_running_resource_update_rejected_before_writes(self):
         apply(self.client, self.topology)
         self.client.nodes["1"]["status"] = 2
