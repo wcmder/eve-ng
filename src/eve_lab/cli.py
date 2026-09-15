@@ -66,8 +66,7 @@ def main():
         if name == "init":
             command.add_argument("--node", help="Initialize only this remote node")
             command.add_argument("--management-ip", help="Palo/Panorama management IPv4 address; requires --node (overrides lab init.yaml)")
-            command.add_argument("--prepare-console", action="store_true", help="Switch one stopped Panorama node to Telnet serial console; does not start or initialize it")
-            command.add_argument("--factory-default", action="store_true", help="Initialize one factory-default Panorama using admin/admin and change to PALO_PASSWORD")
+            command.add_argument("--prepare-console", action="store_true", help="Switch one stopped Panorama or Palo Alto firewall node to Telnet serial console; does not start or initialize it")
             command.add_argument("--check", action="store_true", help="Preview config files and API console mapping without console access")
             command.add_argument("--timeout", type=int, default=600, help="Boot prompt/commit wait in seconds (default: 600)")
         if name == "restore":
@@ -129,11 +128,11 @@ def main():
                     result = apply(client, topology, prune=args.prune)
                 elif args.command == "init":
                     if args.prepare_console:
-                        if args.factory_default or args.management_ip:
-                            raise ValueError('--prepare-console cannot be combined with --factory-default or --management-ip')
+                        if args.management_ip:
+                            raise ValueError('--prepare-console cannot be combined with --management-ip')
                         result = prepare_panorama_console(client, topology, args.node, args.check)
                     else:
-                        result = initialize(client, topology, args.root, args.server, args.node, args.check, args.timeout, args.management_ip, args.factory_default)
+                        result = initialize(client, topology, args.root, args.server, args.node, args.check, args.timeout, args.management_ip)
                 elif args.command == "bootstrap":
                     result = prepare_bootstrap(client, topology, args.root, args.server, args.node, args.check, args.attach)
                 elif args.command == "restore":

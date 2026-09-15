@@ -7,6 +7,7 @@ nodes:
   - name: c8kv-0
     template: c8000v
     type: qemu
+    console: telnet
     image: c8000v-17.15.06
     cpu: 2
     ethernet: 8
@@ -15,6 +16,7 @@ nodes:
   - name: c8kv-a
     template: c8000v
     type: qemu
+    console: telnet
     image: c8000v-17.15.06
     cpu: 2
     ethernet: 4
@@ -23,6 +25,7 @@ nodes:
   - name: pa-a
     template: paloalto
     type: qemu
+    console: telnet
     image: paloalto-12.1.7
     cpu: 4
     ram: 12288
@@ -31,6 +34,7 @@ nodes:
   - name: pa-b
     template: paloalto
     type: qemu
+    console: telnet
     image: paloalto-12.1.7
     cpu: 4
     ram: 12288
@@ -39,6 +43,7 @@ nodes:
   - name: pa-c
     template: paloalto
     type: qemu
+    console: telnet
     image: paloalto-12.1.7
     cpu: 4
     ram: 12288
@@ -47,6 +52,7 @@ nodes:
   - name: pano
     template: panorama
     type: qemu
+    console: telnet
     image: panorama-12.1.5
     cpu: 8
     ram: 32768

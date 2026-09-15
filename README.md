@@ -365,9 +365,33 @@ eve start palo-lab1 --node pano
 `--prepare-console` changes only the selected node's console type to `telnet` and
 verifies EVE saved it. It does not start, wipe, or initialize the device. For new
 nodes, `console: telnet` can instead be set under that node in `topology.yaml`.
-If YAML explicitly specifies `console: vnc`, update that field to match. This
-serial workflow still requires a live first-boot test on the target image; a
-timeout should be investigated through the console rather than reported as success.
+If YAML explicitly specifies `console: vnc`, update that field to match. Panorama serial initialization has been tested on 12.1.5. Firewall serial login
+is configured in the inspected 12.1.7 image; its live first-boot test is pending.
+
+Palo Alto firewall nodes also support `--prepare-console`:
+
+```sh
+eve stop palo-lab1 --node pa-a
+eve init palo-lab1 --node pa-a --prepare-console --check
+eve init palo-lab1 --node pa-a --prepare-console
+eve start palo-lab1 --node pa-a
+eve init palo-lab1 --node pa-a --timeout 1800
+```
+
+Firewall serial init uses `PALO_USERNAME` / `PALO_PASSWORD` from `.env` and the
+same automatic first-login password handling described below for Panorama.
+It applies `labs/<lab>/configs/<node>-init.cfg` and confirms the commit.
+Include the desired management settings in that file; for DHCP on the management
+interface connected to pnet1 and SSH/HTTPS access, add:
+
+```text
+set deviceconfig system type dhcp-client
+set deviceconfig system service disable-ssh no
+set deviceconfig system service disable-https no
+```
+
+This serial workflow does not require a bootstrap ISO. SSH initialization continues
+to require working management connectivity and the configured credentials.
 
 Set Panorama management networking in `.env`. The prepared address is outside
 pnet1's current DHCP pool (`172.16.1.100`–`172.16.1.199`):
@@ -396,23 +420,26 @@ See [management DHCP limitations](https://docs.paloaltonetworks.com/ngfw/network
 Use `PALO_USERNAME=admin` and the desired nondefault `PALO_PASSWORD` in `.env`:
 
 ```sh
-eve init palo-lab1 --node pano --factory-default --check
-eve init palo-lab1 --node pano --factory-default --timeout 1800
+eve init palo-lab1 --node pano --check
+eve init palo-lab1 --node pano --timeout 1800
 ```
 
-`--factory-default` is explicit permission to log in with `admin/admin` and answer
-the mandatory old/new/confirm password prompts using the password from `.env`.
-It requires one Panorama node and always uses its serial console, ignoring any
-existing management-IP mapping. It does not reset the node. The command waits
+Panorama serial initialization automatically handles first-time setup. It tries
+the configured credentials first; if authentication explicitly fails for `admin`,
+it tries `admin/admin` once and handles the mandatory old/new/confirm password
+prompts using `PALO_PASSWORD`. An already-initialized device uses the configured
+credentials without a factory-password attempt. It does not reset the node. The command waits
 for prompts, applies the init file, sets the hostname to the EVE node name,
 enables management SSH/HTTPS, and commits. Success requires confirmation of the
 commit; a failure may leave a changed password or candidate configuration.
-Repeated password prompts fail without logging secrets. If the password already
-changed, retry without `--factory-default` after checking the console.
+Repeated password-change prompts fail without logging secrets. If initialization
+fails after changing the password, the same command can be rerun using `.env` credentials.
 
 For subsequent configuration changes, use `eve init palo-lab1 --node pano`, or
 use `--management-ip <address>` / the lab's `init.yaml` to connect over SSH.
-SSH keeps the existing device host-key verification. `--check` validates local
+SSH uses only the configured credentials and keeps device host-key verification;
+automatic factory-password handling is limited to the serial console.
+`--check` validates local
 files and advertised console settings without logging in to the device.
 No licenses or software updates are included. The admin password is hashed using
 the crypt format used by Palo's bootstrap example; it is not stored as plaintext.

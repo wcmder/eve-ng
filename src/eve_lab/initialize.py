@@ -52,35 +52,52 @@ class PaloConsole(Console):
         self.command('exit')
 
 
-class PanoramaConsole(PaloConsole):
-    """Panorama serial login, including an explicit factory-password transition."""
+class PaloSerialConsole(PaloConsole):
+    """PAN-OS serial login, including automatic first-login password setup."""
 
-    def login(self, username, password, factory_default=False):
-        if not factory_default:
+    def login(self, username, password, auto_factory=True):
+        if not auto_factory:
             return super().login(username, password)
-        if username != 'admin' or password == 'admin':
-            raise ValueError('Factory Panorama setup requires PALO_USERNAME=admin and a nondefault PALO_PASSWORD')
+        if username == 'admin' and password == 'admin':
+            raise ValueError('Set a nondefault PALO_PASSWORD for Palo Alto initialization')
         if not password or any(ord(c) < 32 or ord(c) == 127 for c in password):
             raise ValueError('Invalid PALO_PASSWORD')
         self.send('')
         stages = set()
+        login_password = password
+        used_factory = False
+        stale_failures = 0
         pattern = (r'(?im:^[^\n]*login:\s*$|^username:\s*$|^password:\s*$|'
                    r'^(?:enter )?(?:old|new|confirm|retype)[^\n]*password[^\n]*$|'
                    r'^login incorrect\s*$|^authentication failed[^\n]*$)|'
                    r'^[\w.@()/:\-]+[>#]\s*$')
-        for _ in range(10):
+        for _ in range(16):
             _, match = self.expect(pattern, timeout=self.boot_timeout, wake=not stages)
             prompt = match.group().strip().lower()
             if 'incorrect' in prompt or 'authentication failed' in prompt:
-                raise RuntimeError('Factory Panorama login failed; wait for boot readiness or omit --factory-default on an initialized device')
+                if 'password' not in stages and not {'old', 'new', 'confirm'} & stages and stale_failures < 1:
+                    # Shared EVE consoles may still be at a password prompt;
+                    # our initial Enter can finish that abandoned attempt.
+                    stale_failures += 1
+                    stages.clear()
+                    print('Discarding an earlier console login failure; waiting for a fresh login prompt...', file=sys.stderr, flush=True)
+                    continue
+                if username == 'admin' and not used_factory and 'password' in stages and not {'old', 'new', 'confirm'} & stages:
+                    login_password = 'admin'
+                    used_factory = True
+                    stages.clear()
+                    print('Configured Palo Alto credentials rejected; trying factory credentials once...', file=sys.stderr, flush=True)
+                    continue
+                attempted = 'configured and factory credentials' if used_factory else 'configured credentials'
+                raise RuntimeError('Palo Alto rejected ' + attempted + '; check the console for boot readiness, account lockout, or a different current password')
             if prompt.endswith(('>', '#')):
-                if not {'new', 'confirm'} <= stages:
-                    raise RuntimeError('Panorama did not confirm the mandatory password change; no init commands applied')
+                if (used_factory or {'old', 'new', 'confirm'} & stages) and not {'new', 'confirm'} <= stages:
+                    raise RuntimeError('Palo Alto did not confirm the mandatory password change; no init commands applied')
                 if prompt.endswith('#'):
                     self.command('exit')
                 return
             if 'old' in prompt:
-                stage, value = 'old', 'admin'
+                stage, value = 'old', login_password
             elif 'confirm' in prompt or 'retype' in prompt:
                 stage, value = 'confirm', password
             elif 'new' in prompt:
@@ -88,12 +105,20 @@ class PanoramaConsole(PaloConsole):
             elif prompt.endswith('login:') or prompt.startswith('username:'):
                 stage, value = 'username', username
             else:
-                stage, value = 'password', 'admin'
+                stage, value = 'password', login_password
             if stage in stages:
-                raise RuntimeError('Panorama repeated a login/password-change prompt; inspect password policy and boot readiness (secrets omitted)')
+                raise RuntimeError('Palo Alto repeated a login/password-change prompt; inspect password policy and boot readiness (secrets omitted)')
             stages.add(stage)
+            if stage == 'password':
+                print('Submitting ' + ('factory' if used_factory else 'configured') + ' Palo Alto credentials...', file=sys.stderr, flush=True)
+            elif stage in ('old', 'new', 'confirm'):
+                print('Answering Palo Alto ' + stage + '-password prompt (value hidden)...', file=sys.stderr, flush=True)
             self.send(value)
-        raise RuntimeError('Panorama first-login sequence did not complete')
+        raise RuntimeError('Palo Alto first-login sequence did not complete')
+
+
+class PanoramaConsole(PaloSerialConsole):
+    """Panorama uses the shared PAN-OS serial login sequence."""
 
 
 def prepare_panorama_console(client, topology, node_name, check=False):
@@ -101,8 +126,8 @@ def prepare_panorama_console(client, topology, node_name, check=False):
         raise ValueError('--prepare-console requires --node')
     path = lab_path(topology)
     node = named(client, path + '/nodes').get(node_name)
-    if not node or node.get('template') != 'panorama':
-        raise ValueError('--prepare-console requires a Panorama node')
+    if not node or node.get('template') not in ('panorama', 'paloalto'):
+        raise ValueError('--prepare-console requires a Panorama or Palo Alto firewall node')
     if str(node.get('status')) != '0':
         raise ValueError('Stop ' + node_name + ' before preparing its console')
     result = {'lab': topology['name'], 'node': node_name, 'check': check,
@@ -112,7 +137,7 @@ def prepare_panorama_console(client, topology, node_name, check=False):
     endpoint = path + '/nodes/' + quote(node['id'], safe='')
     current = client.request('GET', endpoint)
     if any(current.get(k) != node.get(k) for k in ('name', 'template', 'console')) or str(current.get('status')) != '0':
-        raise RuntimeError('Panorama changed or started; console not modified')
+        raise RuntimeError('Node changed or started; console not modified')
     client.request('PUT', endpoint, {'name': node_name, 'console': 'telnet'})
     if client.request('GET', endpoint).get('console') != 'telnet':
         raise RuntimeError('EVE did not persist the Telnet console setting')
@@ -178,14 +203,10 @@ def config_commands(path, template):
     return commands
 
 
-def initialize(client, topology, root, server_name, node_name=None, check=False, timeout=600, management_ip=None, factory_default=False):
+def initialize(client, topology, root, server_name, node_name=None, check=False, timeout=600, management_ip=None):
     if not 1 <= timeout <= 3600:
         raise ValueError('--timeout must be between 1 and 3600 seconds')
     nodes = named(client, lab_path(topology) + '/nodes')
-    if factory_default and (not node_name or node_name not in nodes or nodes[node_name].get('template') != 'panorama'):
-        raise ValueError('--factory-default requires --node selecting one Panorama')
-    if factory_default and management_ip:
-        raise ValueError('--factory-default requires the serial console, not --management-ip')
     targets = management_targets(root, topology['name'], node_name, management_ip)
     if management_ip and node_name in nodes and nodes[node_name].get('template') not in ('paloalto', 'panorama'):
         raise ValueError('--management-ip supports Palo Alto and Panorama nodes only')
@@ -199,15 +220,13 @@ def initialize(client, topology, root, server_name, node_name=None, check=False,
     base = (Path(root) / 'labs' / topology['name'] / 'configs').resolve()
     for name, node in nodes.items():
         template = node.get('template')
-        address = targets.get(name) if template in ('paloalto', 'panorama') and not factory_default else None
+        address = targets.get(name) if template in ('paloalto', 'panorama') else None
         reason = None
         if template not in ('c8000v', 'paloalto', 'panorama'):
             reason = 'Unsupported init template: ' + str(template)
         elif node.get('console') != 'telnet' and not address:
             reason = 'Console type ' + str(node.get('console')) + ' is unsupported; init requires a working Telnet serial console'
-            if template == 'paloalto':
-                reason += ' or a Palo management_ip in init.yaml/--management-ip'
-            elif template == 'panorama':
+            if template in ('paloalto', 'panorama'):
                 reason += '; stop the node and run eve init <lab> --node <name> --prepare-console, or use --management-ip after initial setup'
         elif not re.fullmatch(r'[A-Za-z0-9_-][A-Za-z0-9_.-]*', name):
             reason = 'Node name is not a safe config filename'
@@ -221,7 +240,7 @@ def initialize(client, topology, root, server_name, node_name=None, check=False,
         commands = config_commands(path, template)
         if template == 'panorama':
             commands += panorama_network_commands(root)
-            if factory_default:
+            if not address:
                 validate_panorama_network(commands)
             commands += ['set deviceconfig system hostname ' + name,
                          'set deviceconfig system service disable-ssh no',
@@ -254,16 +273,17 @@ def initialize(client, topology, root, server_name, node_name=None, check=False,
             print(f'Waiting for {name} console (up to {timeout}s per prompt)...', file=sys.stderr, flush=True)
             try:
                 login = logins[template]
-                if template in ('paloalto', 'panorama') and targets.get(name) and not factory_default:
+                if template in ('paloalto', 'panorama') and targets.get(name):
                     device, channel = connect_palo(ssh, targets[name], login[0], login[1], timeout)
                 else:
                     channel = ssh.get_transport().open_session(timeout=10)
                     channel.get_pty(term='vt100', width=512, height=1000)
                     channel.exec_command('telnet 127.0.0.1 ' + str(port))
-                console_type = {'paloalto': PaloConsole, 'panorama': PanoramaConsole}.get(template, Console)
+                console_type = {'paloalto': PaloConsole if targets.get(name) else PaloSerialConsole,
+                                'panorama': PanoramaConsole}.get(template, Console)
                 console = console_type(channel, boot_timeout=timeout)
-                if template == 'panorama':
-                    console.login(*login, factory_default=factory_default)
+                if template == 'panorama' or (template == 'paloalto' and not targets.get(name)):
+                    console.login(*login, auto_factory=not bool(targets.get(name)))
                 else:
                     console.login(*login)
                 print('Applying init to ' + name + '...', file=sys.stderr, flush=True)
@@ -275,8 +295,6 @@ def initialize(client, topology, root, server_name, node_name=None, check=False,
                     except (RuntimeError, ValueError, OSError, paramiko.SSHException):
                         result['warnings'].append({'node': name, 'reason':
                             'Init saved successfully, but interface status could not be read; inspect show ip interface brief'})
-                else:
-                    result['warnings'].append({'node': name, 'reason': 'Interface IP reporting is currently supported for c8000v only'})
             except RuntimeError as error:
                 result['failed'].append({'node': name, 'reason': str(error)})
                 print(f'Failed {name}: {error}; partial changes may remain', file=sys.stderr)
