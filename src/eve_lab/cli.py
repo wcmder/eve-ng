@@ -11,12 +11,12 @@ import yaml
 from .client import EveClient
 from .backup import backup
 from .restore import restore
-from .initialize import initialize
+from .initialize import initialize, prepare_panorama_console
 from .bootstrap import prepare as prepare_bootstrap
 from .config import load_server
 from .nat import configure as configure_nat
 from .securecrt import generate as generate_securecrt
-from .dhcp import clear as clear_dhcp, report as report_dhcp
+from .dhcp import clear as clear_dhcp, report as report_dhcp, update_dns as update_dhcp_dns
 from .deploy import apply, delete, lab_status, lifecycle, plan
 from .topology import load_lab_target, load_topology
 
@@ -39,6 +39,12 @@ def main():
     report = dhcp_commands.add_parser("report", help="List pnet1 DHCP leases without changes")
     report.add_argument("interface", choices=["pnet1"])
     report.add_argument("--server", default="default")
+    update = dhcp_commands.add_parser('update', help='Update DHCP server settings')
+    update_commands = update.add_subparsers(dest='dhcp_update', required=True)
+    dns = update_commands.add_parser('dns', help='Advertise DNS servers from EVE_DHCP_DNS in .env')
+    dns.add_argument('interface', nargs='?', default='pnet1', choices=['pnet1'])
+    dns.add_argument('--server', default='default')
+    dns.add_argument('--dry-run', action='store_true', help='Preview DNS changes without modifying DHCP')
     securecrt = commands.add_parser("securecrt", help="Generate SSH sessions from the DHCP report")
     securecrt.add_argument("interface", choices=["pnet1"])
     securecrt.add_argument("--server", default="default")
@@ -59,7 +65,9 @@ def main():
             command.add_argument("--attach", action="store_true", help="Attach prepared media to the stopped node; never wipes or starts it")
         if name == "init":
             command.add_argument("--node", help="Initialize only this remote node")
-            command.add_argument("--management-ip", help="Palo management IPv4 address; requires --node (overrides lab init.yaml)")
+            command.add_argument("--management-ip", help="Palo/Panorama management IPv4 address; requires --node (overrides lab init.yaml)")
+            command.add_argument("--prepare-console", action="store_true", help="Switch one stopped Panorama node to Telnet serial console; does not start or initialize it")
+            command.add_argument("--factory-default", action="store_true", help="Initialize one factory-default Panorama using admin/admin and change to PALO_PASSWORD")
             command.add_argument("--check", action="store_true", help="Preview config files and API console mapping without console access")
             command.add_argument("--timeout", type=int, default=600, help="Boot prompt/commit wait in seconds (default: 600)")
         if name == "restore":
@@ -97,8 +105,11 @@ def main():
             print(json.dumps(result, indent=2))
             return
         if args.command == "dhcp":
-            result = (report_dhcp(server, args.interface) if args.dhcp_action == "report"
-                      else clear_dhcp(server, args.interface, args.dry_run))
+            if args.dhcp_action == 'update':
+                result = update_dhcp_dns(server, args.interface, args.root, args.dry_run)
+            else:
+                result = (report_dhcp(server, args.interface) if args.dhcp_action == "report"
+                          else clear_dhcp(server, args.interface, args.dry_run))
             print(json.dumps(result, indent=2))
             return
         if args.command in ("stop", "backup", "restore", "init", "bootstrap") or (args.command == "start" and args.node):
@@ -117,7 +128,12 @@ def main():
                 if args.command == "apply":
                     result = apply(client, topology, prune=args.prune)
                 elif args.command == "init":
-                    result = initialize(client, topology, args.root, args.server, args.node, args.check, args.timeout, args.management_ip)
+                    if args.prepare_console:
+                        if args.factory_default or args.management_ip:
+                            raise ValueError('--prepare-console cannot be combined with --factory-default or --management-ip')
+                        result = prepare_panorama_console(client, topology, args.node, args.check)
+                    else:
+                        result = initialize(client, topology, args.root, args.server, args.node, args.check, args.timeout, args.management_ip, args.factory_default)
                 elif args.command == "bootstrap":
                     result = prepare_bootstrap(client, topology, args.root, args.server, args.node, args.check, args.attach)
                 elif args.command == "restore":
@@ -143,7 +159,7 @@ def main():
                 except RuntimeError as error:
                     print(f"Logout warning: {error}", file=sys.stderr)
         print(json.dumps(result, indent=2))
-        if args.command in ("backup", "init") and result["failed"]:
+        if args.command in ("backup", "init") and result.get("failed"):
             sys.exit(1)
     except (OSError, ValueError, RuntimeError, yaml.YAMLError) as error:
         parser.exit(1, f"Error: {error}\n")

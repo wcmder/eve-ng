@@ -6,6 +6,8 @@ import shlex
 from urllib.parse import urlsplit
 
 import paramiko
+from ipaddress import IPv4Address
+from .device_console import environment_values
 
 
 def clear(server, interface, dry_run=False):
@@ -14,6 +16,23 @@ def clear(server, interface, dry_run=False):
 
 def report(server, interface):
     return _invoke(server, interface, report=True)
+
+
+def update_dns(server, interface, root, dry_run=False):
+    if interface != 'pnet1':
+        raise ValueError('DHCP DNS updates currently support only pnet1')
+    value = environment_values(root).get('EVE_DHCP_DNS', '')
+    if not value.strip():
+        raise ValueError('Set EVE_DHCP_DNS in .env, e.g. 8.8.8.8,1.1.1.1')
+    try:
+        servers = list(dict.fromkeys(str(IPv4Address(part.strip())) for part in value.split(',')))
+    except ValueError:
+        raise ValueError('EVE_DHCP_DNS must be a comma-separated list of IPv4 addresses') from None
+    source = Path(__file__).with_name('dhcp_remote.py').read_text()
+    remote = 'python3 -c ' + shlex.quote(source) + ' --update-dns ' + shlex.quote(','.join(servers))
+    if dry_run:
+        remote += ' --dry-run'
+    return run_remote(server, remote)
 
 
 def _invoke(server, interface, dry_run=False, report=False):

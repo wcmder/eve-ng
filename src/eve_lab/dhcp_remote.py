@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import sys
 import time
+import tempfile
+from ipaddress import IPv4Address
 
 
 def run(*args):
@@ -93,9 +95,78 @@ def clear_leases(dry_run=False, config_path="/etc/eve-dhcp/pnet1.conf",
     return result
 
 
+def update_dns(servers, dry_run=False, config_path='/etc/eve-dhcp/pnet1.conf',
+               lease_path='/var/lib/eve-dhcp/pnet1.leases'):
+    servers = list(dict.fromkeys(str(IPv4Address(value.strip())) for value in servers))
+    if not servers:
+        raise ValueError('At least one DNS IPv4 address is required')
+    # Reuse the dedicated-service checks; report mode does not modify leases.
+    clear_leases(config_path=config_path, lease_path=lease_path, report=True)
+    config = Path(config_path)
+    if config.is_symlink() or not config.is_file():
+        raise RuntimeError('Expected a regular DHCP configuration file')
+    original = config.read_text()
+    lines = []
+    previous = []
+    for line in original.splitlines():
+        key, sep, value = line.strip().partition('=')
+        if sep and key in ('dhcp-option', 'dhcp-option-force'):
+            parts = [p.strip() for p in value.split(',')]
+            if any(p in ('6', 'option:dns-server') for p in parts):
+                if parts[0] not in ('6', 'option:dns-server'):
+                    raise RuntimeError('Tagged DHCP DNS options require manual configuration')
+                previous.append(line.strip())
+                continue
+        lines.append(line)
+    option = 'dhcp-option=option:dns-server,' + ','.join(servers)
+    updated = '\n'.join(lines + [option]) + '\n'
+    result = {'action': 'update-dns', 'interface': 'pnet1', 'dns_servers': servers,
+              'previous_options': previous, 'dry_run': dry_run, 'changed': False,
+              'would_change': updated != original, 'backup': None}
+    if dry_run or updated == original:
+        return result
+    fd, temporary = tempfile.mkstemp(prefix='.pnet1-dns-', dir=config.parent)
+    backup = config.with_name(config.name + '.backup-' + str(time.time_ns()))
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            stream.write(updated)
+        run('dnsmasq', '--test', '--conf-file=' + temporary)
+        if config.read_text() != original:
+            raise RuntimeError('DHCP configuration changed during validation; retry')
+        shutil.copy2(config, backup)
+        stat = config.stat()
+        os.chmod(temporary, stat.st_mode & 0o777)
+        os.chown(temporary, stat.st_uid, stat.st_gid)
+        os.replace(temporary, config)
+        try:
+            run('systemctl', 'restart', 'eve-pnet1-dhcp.service')
+            if run('systemctl', 'is-active', 'eve-pnet1-dhcp.service') != 'active':
+                raise RuntimeError('DHCP service did not become active')
+        except (RuntimeError, OSError, subprocess.SubprocessError) as error:
+            shutil.copy2(backup, config)
+            try:
+                run('systemctl', 'restart', 'eve-pnet1-dhcp.service')
+                if run('systemctl', 'is-active', 'eve-pnet1-dhcp.service') != 'active':
+                    raise RuntimeError('DHCP service is inactive')
+            except (RuntimeError, OSError, subprocess.SubprocessError):
+                raise RuntimeError(f'DNS update failed and DHCP recovery failed; inspect service; backup: {backup}') from None
+            raise RuntimeError(f'DNS update failed; previous configuration restored; backup: {backup}') from error
+        result.update(changed=True, backup=str(backup), service='active',
+                      message='DNS updated; clients receive new settings on DHCP renewal. Leases were not cleared.')
+        return result
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 if __name__ == "__main__":
     try:
-        print(json.dumps(clear_leases("--dry-run" in sys.argv, report="--report" in sys.argv)))
-    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        if '--update-dns' in sys.argv:
+            servers = sys.argv[sys.argv.index('--update-dns') + 1].split(',')
+            result = update_dns(servers, dry_run='--dry-run' in sys.argv)
+        else:
+            result = clear_leases("--dry-run" in sys.argv, report="--report" in sys.argv)
+        print(json.dumps(result))
+    except (OSError, RuntimeError, ValueError, IndexError, subprocess.SubprocessError) as error:
         print(f"DHCP error: {error}", file=sys.stderr)
         sys.exit(1)

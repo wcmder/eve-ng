@@ -171,7 +171,7 @@ class Console:
         return [interface for interface in interfaces if interface['ip_address'] is not None]
 
 
-def credentials(root, prefix='CISCO'):
+def environment_values(root):
     values = {}
     path = root / '.env'
     if path.exists():
@@ -180,6 +180,11 @@ def credentials(root, prefix='CISCO'):
             if sep and not key.strip().startswith('#'):
                 values[key.strip()] = value.strip()
     values.update(os.environ)
+    return values
+
+
+def credentials(root, prefix='CISCO'):
+    values = environment_values(root)
     names = (prefix + '_USERNAME', prefix + '_PASSWORD')
     if prefix == 'CISCO':
         names += ('CISCO_ENABLE_SECRET',)

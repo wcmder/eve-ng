@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from eve_lab.dhcp_remote import clear_leases
+from eve_lab.dhcp_remote import clear_leases, update_dns
 
 
 class DhcpTests(unittest.TestCase):
@@ -96,6 +96,66 @@ class DhcpTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'regular'):
             self.clear()
         self.assertTrue(other.read_text())
+
+    def update(self, dry_run=False):
+        return update_dns(['8.8.8.8', '1.1.1.1'], dry_run, self.config, self.leases)
+
+    def test_dns_update_backup_preserves_leases_and_is_idempotent(self):
+        with self.config.open('a') as stream:
+            stream.write('dhcp-option=6\ndhcp-option=option:router,172.16.1.1\n')
+        original = self.config.read_text()
+        leases = self.leases.read_text()
+        result = self.update()
+        self.assertTrue(result['changed'])
+        self.assertEqual(Path(result['backup']).read_text(), original)
+        self.assertEqual(self.leases.read_text(), leases)
+        self.assertIn('dhcp-option=option:router,172.16.1.1', self.config.read_text())
+        self.assertIn('dhcp-option=option:dns-server,8.8.8.8,1.1.1.1', self.config.read_text())
+        self.commands.clear()
+        self.assertFalse(self.update()['changed'])
+        self.assertFalse(any(c[1] == 'restart' for c in self.commands))
+
+    def test_dns_dry_run_and_invalid_settings_do_not_write(self):
+        original = self.config.read_text()
+        self.assertTrue(self.update(True)['would_change'])
+        self.assertEqual(self.config.read_text(), original)
+        self.assertFalse(list(self.root.glob('*.backup-*')))
+        for servers in ([], ['bad;command'], ['8.8.8.8', '']):
+            with self.assertRaises(ValueError):
+                update_dns(servers, config_path=self.config, lease_path=self.leases)
+
+    def test_dns_validation_failure_keeps_original(self):
+        original = self.config.read_text()
+        with patch('eve_lab.dhcp_remote.run', side_effect=[
+            f'dnsmasq --conf-file={self.config}', 'active', RuntimeError('syntax error')]):
+            with self.assertRaisesRegex(RuntimeError, 'syntax error'):
+                self.update()
+        self.assertEqual(self.config.read_text(), original)
+        self.assertFalse(list(self.root.glob('.pnet1-dns-*')))
+
+    def test_dns_restart_failure_restores_configuration(self):
+        original = self.config.read_text()
+        with patch('eve_lab.dhcp_remote.run', side_effect=[
+            f'dnsmasq --conf-file={self.config}', 'active', '', RuntimeError('restart failed'), '', 'active']):
+            with self.assertRaisesRegex(RuntimeError, 'previous configuration restored'):
+                self.update()
+        self.assertEqual(self.config.read_text(), original)
+        self.assertTrue(self.leases.read_text())
+
+    @patch.dict('os.environ', {}, clear=True)
+    @patch('eve_lab.dhcp.run_remote')
+    def test_dns_uses_environment_and_rejects_invalid_before_ssh(self, remote):
+        from eve_lab.dhcp import update_dns as invoke
+        (self.root / '.env').write_text('EVE_DHCP_DNS=8.8.8.8,1.1.1.1\n')
+        invoke({}, 'pnet1', self.root, dry_run=True)
+        self.assertTrue(remote.call_args.args[1].endswith('--update-dns 8.8.8.8,1.1.1.1 --dry-run'))
+        with patch.dict('os.environ', {'EVE_DHCP_DNS': '9.9.9.9'}):
+            invoke({}, 'pnet1', self.root)
+            self.assertTrue(remote.call_args.args[1].endswith('--update-dns 9.9.9.9'))
+        remote.reset_mock()
+        with patch.dict('os.environ', {'EVE_DHCP_DNS': '8.8.8.8;command'}):
+            with self.assertRaises(ValueError): invoke({}, 'pnet1', self.root)
+        remote.assert_not_called()
 
 if __name__ == '__main__':
     unittest.main()

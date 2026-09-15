@@ -76,6 +76,14 @@ def prepare(client, topology, root, server_name, node_name, check=False, attach=
         raise ValueError('Invalid bootstrap node name')
     path = lab_path(topology)
     node = named(client, path + '/nodes').get(node_name)
+    if node and node.get('template') == 'panorama':
+        raise ValueError(
+            'Panorama configuration bootstrap is not supported by this command. '
+            'The inspected Panorama 12.1.5 image restricts ISO bootstrap to external '
+            'software installation; it rejects the firewall init-cfg.txt/bootstrap.xml '
+            'workflow. Configure administrator credentials and management networking '
+            'through the Panorama console, then commit. No media was generated or attached.'
+        )
     if not node or node.get('template') != 'paloalto':
         raise ValueError('Select an existing Palo Alto node with --node')
     endpoint = path + '/nodes/' + quote(node['id'], safe='')

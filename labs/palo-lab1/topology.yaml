@@ -23,7 +23,7 @@ nodes:
   - name: pa-a
     template: paloalto
     type: qemu
-    image: paloalto-11.2.10-h6
+    image: paloalto-12.1.7
     cpu: 4
     ram: 12288
     ethernet: 4
@@ -31,9 +31,25 @@ nodes:
   - name: pa-b
     template: paloalto
     type: qemu
-    image: paloalto-11.2.10-h6
+    image: paloalto-12.1.7
     cpu: 4
     ram: 12288
+    ethernet: 4
+
+  - name: pa-c
+    template: paloalto
+    type: qemu
+    image: paloalto-12.1.7
+    cpu: 4
+    ram: 12288
+    ethernet: 4
+
+  - name: pano
+    template: panorama
+    type: qemu
+    image: panorama-12.1.5
+    cpu: 8
+    ram: 32768
     ethernet: 4
 
 networks:
@@ -57,6 +73,14 @@ links:
 
   - node: pa-b
     interface: mgmt
+    network: mgmt
+
+  - node: pa-c
+    interface: mgmt
+    network: mgmt
+
+  - node: pano
+    interface: e0
     network: mgmt
 
   - name: c8kv0-paa

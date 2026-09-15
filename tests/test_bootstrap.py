@@ -67,6 +67,18 @@ class BootstrapTests(unittest.TestCase):
             self.run_prepare(attach=True)
 
     @patch('eve_lab.bootstrap.paramiko.SSHClient')
+    @patch('eve_lab.bootstrap.credentials')
+    def test_panorama_rejection_does_not_prepare_or_attach_media(self, creds, ssh):
+        self.detail.update(template='panorama', image='panorama-12.1.5')
+        for options in ({}, {'check': True}, {'attach': True}):
+            with self.assertRaisesRegex(ValueError, 'external software installation'):
+                self.run_prepare(**options)
+        creds.assert_not_called()
+        ssh.assert_not_called()
+        self.assertEqual(list(self.root.iterdir()), [])
+        self.assertTrue(all(c.args[0] == 'GET' for c in self.client.request.call_args_list))
+
+    @patch('eve_lab.bootstrap.paramiko.SSHClient')
     @patch('eve_lab.bootstrap.load_server', return_value={'url': 'http://10.0.4.4', 'ssh_username': 'root', 'ssh_password': 'test'})
     @patch('eve_lab.bootstrap.credentials', return_value=['admin', 'secret'])
     @patch('eve_lab.bootstrap.bootstrap_files', return_value={'config/init-cfg.txt': 'type=dhcp-client\n', 'config/bootstrap.xml': '<config/>'})

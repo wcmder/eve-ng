@@ -341,6 +341,79 @@ Each invocation builds a separate ISO for that node; it is not one shared ISO
 for all firewalls. Previously generated ISOs must be rebuilt to include the
 hostname. An already-initialized guest does not reapply bootstrap just on reboot.
 Empty `content`, `software`, and `license` folders complete the package.
+
+Panorama is not supported by `eve bootstrap`. Read-only inspection of the
+`panorama-12.1.5` image found that its bootstrap sanity check requires an external
+software-install operation on Panorama-PC; it rejects ordinary firewall
+`init-cfg.txt`/`bootstrap.xml` provisioning. A CD-ROM attachment alone cannot
+enable that workflow. The command rejects Panorama before generating or attaching
+media. Use the Panorama VNC console for the initial administrator password and
+management network configuration, then commit, or use the Panorama serial-console
+workflow below. See [Panorama initial configuration](https://docs.paloaltonetworks.com/panorama/getting-started/set-up-panorama/set-up-the-panorama-virtual-appliance/perform-initial-configuration-of-the-panorama-virtual-appliance).
+
+Panorama initialization uses `eve init`, not a bootstrap ISO. The 12.1.5 image
+contains a serial-login configuration, while EVE's Panorama template defaults to
+VNC. Prepare a stopped node's serial console first:
+
+```sh
+eve stop palo-lab1 --node pano
+eve init palo-lab1 --node pano --prepare-console --check
+eve init palo-lab1 --node pano --prepare-console
+eve start palo-lab1 --node pano
+```
+
+`--prepare-console` changes only the selected node's console type to `telnet` and
+verifies EVE saved it. It does not start, wipe, or initialize the device. For new
+nodes, `console: telnet` can instead be set under that node in `topology.yaml`.
+If YAML explicitly specifies `console: vnc`, update that field to match. This
+serial workflow still requires a live first-boot test on the target image; a
+timeout should be investigated through the console rather than reported as success.
+
+Set Panorama management networking in `.env`. The prepared address is outside
+pnet1's current DHCP pool (`172.16.1.100`–`172.16.1.199`):
+
+```dotenv
+PANORAMA_MANAGEMENT_IP=172.16.1.50
+PANORAMA_NETMASK=255.255.255.0
+PANORAMA_GATEWAY=172.16.1.1
+PANORAMA_DNS=1.1.1.1
+```
+
+All four values are required when any is set. Shell environment values override
+`.env`; these settings apply to the Panorama node being initialized. Assign a
+different address when initializing another Panorama. They override management
+network commands in `configs/<node>-init.cfg`. The prepared
+`labs/palo-lab1/configs/pano-init.cfg` is a comment-only file where optional
+additional configuration-mode `set`/`delete` commands can be added. IP values are
+validated before any device login; `.env` remains gitignored.
+
+Panorama's documented management interface does not support the VM-Series
+DHCP-client configuration. Connecting `pano.e0` to `pnet1` does not enable DHCP.
+First-time init requires a static IPv4 address, netmask, gateway, and primary DNS;
+no DHCP lease is automatically allocated or reserved.
+See [management DHCP limitations](https://docs.paloaltonetworks.com/ngfw/networking/dhcp/configure-the-management-interface-as-a-dhcp-client).
+
+Use `PALO_USERNAME=admin` and the desired nondefault `PALO_PASSWORD` in `.env`:
+
+```sh
+eve init palo-lab1 --node pano --factory-default --check
+eve init palo-lab1 --node pano --factory-default --timeout 1800
+```
+
+`--factory-default` is explicit permission to log in with `admin/admin` and answer
+the mandatory old/new/confirm password prompts using the password from `.env`.
+It requires one Panorama node and always uses its serial console, ignoring any
+existing management-IP mapping. It does not reset the node. The command waits
+for prompts, applies the init file, sets the hostname to the EVE node name,
+enables management SSH/HTTPS, and commits. Success requires confirmation of the
+commit; a failure may leave a changed password or candidate configuration.
+Repeated password prompts fail without logging secrets. If the password already
+changed, retry without `--factory-default` after checking the console.
+
+For subsequent configuration changes, use `eve init palo-lab1 --node pano`, or
+use `--management-ip <address>` / the lab's `init.yaml` to connect over SSH.
+SSH keeps the existing device host-key verification. `--check` validates local
+files and advertised console settings without logging in to the device.
 No licenses or software updates are included. The admin password is hashed using
 the crypt format used by Palo's bootstrap example; it is not stored as plaintext.
 The current `*-init.cfg` commands are not translated into bootstrap XML; apply
@@ -507,6 +580,41 @@ changes are **not persisted across host reboots**; rerun add after reboot.
 Remove stops NAT for new connections; existing tracked NAT connections may retain
 their mappings until they expire. No connection tracking entries are flushed.
 Failures report completed commands without automatic rollback.
+
+### Update pnet1 DHCP DNS
+
+Set the comma-separated IPv4 DNS servers in `.env`:
+
+```dotenv
+EVE_DHCP_DNS=8.8.8.8,1.1.1.1
+```
+
+```sh
+eve dhcp update dns --dry-run
+eve dhcp update dns
+eve dhcp update dns pnet1 --server default
+```
+
+`pnet1` is the default and currently the only supported interface. Shell environment
+values override `.env`. The command uses `EVE_SSH_USERNAME`/`EVE_SSH_PASSWORD`,
+validates the dedicated DHCP service and proposed dnsmasq configuration, backs up
+`/etc/eve-dhcp/pnet1.conf` beside the original with a `.backup-<timestamp>` suffix,
+and restarts `eve-pnet1-dhcp.service`. The JSON result includes the backup path.
+If restart fails, it attempts to restore the previous configuration and service.
+No restart or backup occurs when the configuration already matches. `--dry-run`
+reports the proposed DNS settings without writing files or restarting DHCP.
+
+The dedicated EVE host DHCP configuration, `/etc/eve-dhcp/pnet1.conf`, advertises
+Google and Cloudflare DNS to pnet1 clients:
+
+```ini
+dhcp-option=option:dns-server,8.8.8.8,1.1.1.1
+```
+
+Include this option when rebuilding the host's DHCP service. Existing clients
+receive the new DNS servers on DHCP renewal; changing this option does not clear
+their leases. Panorama's static DNS is configured separately through
+`PANORAMA_DNS` in `.env`.
 
 ### Report pnet1 DHCP leases
 
