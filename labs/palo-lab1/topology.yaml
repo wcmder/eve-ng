@@ -4,7 +4,7 @@ remote_folder: /
 
 nodes:
 
-  - name: c8kv-0
+  - name: rt-0
     template: c8000v
     type: qemu
     console: telnet
@@ -13,7 +13,25 @@ nodes:
     ethernet: 8
     ram: 8192
 
-  - name: c8kv-a
+  - name: rt-a
+    template: c8000v
+    type: qemu
+    console: telnet
+    image: c8000v-17.15.06
+    cpu: 2
+    ethernet: 4
+    ram: 8192
+
+  - name: rt-b
+    template: c8000v
+    type: qemu
+    console: telnet
+    image: c8000v-17.15.06
+    cpu: 2
+    ethernet: 4
+    ram: 8192
+
+  - name: rt-c
     template: c8000v
     type: qemu
     console: telnet
@@ -65,11 +83,19 @@ networks:
 
 links:
 
-  - node: c8kv-0
+  - node: rt-0
     interface: GigabitEthernet8
     network: mgmt
 
-  - node: c8kv-a
+  - node: rt-a
+    interface: GigabitEthernet4
+    network: mgmt
+
+  - node: rt-b
+    interface: GigabitEthernet4
+    network: mgmt
+
+  - node: rt-c
     interface: GigabitEthernet4
     network: mgmt
 
@@ -89,18 +115,50 @@ links:
     interface: e0
     network: mgmt
 
-  - name: c8kv0-paa
+  - name: rt0-paa
     from:
-      node: c8kv-0
+      node: rt-0
       interface: GigabitEthernet1
     to:
       node: pa-a
       interface: eth1/1
 
-  - name: c8kva-paa
+  - name: rta-paa
     from:
-      node: c8kv-a
+      node: rt-a
       interface: GigabitEthernet1
     to:
       node: pa-a
+      interface: eth1/2
+
+  - name: rt0-pab
+    from:
+      node: rt-0
+      interface: GigabitEthernet2
+    to:
+      node: pa-b
+      interface: eth1/1
+
+  - name: rtb-pab
+    from:
+      node: rt-b
+      interface: GigabitEthernet1
+    to:
+      node: pa-b
+      interface: eth1/2
+
+  - name: rt0-pac
+    from:
+      node: rt-0
+      interface: GigabitEthernet3
+    to:
+      node: pa-c
+      interface: eth1/1
+
+  - name: rtc-pac
+    from:
+      node: rt-c
+      interface: GigabitEthernet1
+    to:
+      node: pa-c
       interface: eth1/2

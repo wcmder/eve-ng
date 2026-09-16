@@ -524,6 +524,23 @@ class DeploymentTests(unittest.TestCase):
             lifecycle(self.client, self.topology, "start")
         self.assertEqual(len(attempts), 1)
 
+    def test_start_checks_status_after_final_network_error(self):
+        apply(self.client, self.topology)
+        original = self.client.request
+        attempts = []
+        def request(method, path, payload=None):
+            if path.endswith('/start'):
+                attempts.append(path)
+                if len(attempts) == 3:
+                    self.client.nodes['1']['status'] = 2
+                raise EveAPIError('Failed to create network (11).', 400)
+            return original(method, path, payload)
+        self.client.request = request
+        with patch('eve_lab.deploy.time.sleep'):
+            result = lifecycle(self.client, self.topology, 'start')
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(result['changed_nodes'], ['R1'])
+
     def test_lifecycle_only_declared_nodes_and_skip_repeats(self):
         apply(self.client, self.topology)
         self.client.nodes["2"] = {"name": "unmanaged", "status": 0}

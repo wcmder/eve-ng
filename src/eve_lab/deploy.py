@@ -350,8 +350,6 @@ def start_node(client, path, node):
         except EveAPIError as error:
             if error.code != 400 or "Failed to create network (11)" not in str(error):
                 raise
-            if attempt == 2:
-                raise RuntimeError(f"{node['name']} failed to start after 3 attempts: {error}") from error
             time.sleep(attempt + 1)
             current = indexed(client.request("GET", path + "/nodes")).get(node["id"])
             if current is None or current.get("name") != node["name"]:
@@ -360,6 +358,8 @@ def start_node(client, path, node):
                 return
             if str(current.get("status")) != "0":
                 raise RuntimeError(f"Node {node['name']} has status {current.get('status')}; not retrying start") from error
+            if attempt == 2:
+                raise RuntimeError(f"{node['name']} failed to start after 3 attempts; EVE still reports it stopped: {error}") from error
 
 
 def lifecycle(client, topology, action, node_name=None):
