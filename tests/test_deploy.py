@@ -191,12 +191,92 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(apply(self.client, topology, prune=True)["changes"], [])
         self.assertEqual(self.client.networks["1"]["visibility"], 0)
 
-    def test_prune_running_node_rejected_before_writes(self):
+    def test_prune_running_node_is_preserved(self):
         apply(self.client, self.topology)
         self.client.nodes["1"]["status"] = 2
         self.client.writes.clear()
-        with self.assertRaisesRegex(RuntimeError, "Stop all nodes"):
-            apply(self.client, self.topology, prune=True)
+        result = apply(self.client, self.topology, prune=True)
+        self.assertTrue(result['deferred'])
+        self.assertEqual(self.client.writes, [])
+
+    def test_mixed_apply_updates_stopped_and_keeps_running_drift(self):
+        self.topology['nodes'].append(dict(self.topology['nodes'][0], name='R2'))
+        apply(self.client, self.topology)
+        self.client.nodes['1']['status'] = 2
+        self.topology['nodes'][0]['ram'] = 4096
+        self.topology['nodes'][1]['ram'] = 4096
+        self.topology['networks'][0]['type'] = 'bridge'
+        self.client.writes.clear()
+        result = apply(self.client, self.topology)
+        self.assertEqual(self.client.nodes['1']['ram'], 6144)
+        self.assertEqual(self.client.nodes['2']['ram'], 4096)
+        self.assertEqual(self.client.networks['1']['type'], 'pnet1')
+        self.assertTrue(result['deferred'])
+        self.assertEqual(len(self.client.writes), 1)
+        self.assertTrue(self.client.writes[0][1].endswith('/nodes/2'))
+
+    def test_prune_keeps_undeclared_running_node_and_network(self):
+        self.topology['nodes'].append(dict(self.topology['nodes'][0], name='R2'))
+        apply(self.client, self.topology)
+        self.client.nodes['1']['status'] = 2
+        desired = dict(self.topology, nodes=[], networks=[], links=[])
+        apply(self.client, desired)
+        self.assertEqual(set(self.client.nodes), {'1'})
+        self.assertEqual(set(self.client.networks), {'1'})
+        self.assertEqual(str(self.client.ports['1']['7']['network_id']), '1')
+
+    def test_stopped_node_can_join_live_management_cloud(self):
+        self.topology['nodes'].append(dict(self.topology['nodes'][0], name='pano'))
+        apply(self.client, self.topology)
+        self.client.nodes['1']['status'] = 2
+        before = copy.deepcopy(self.client.ports['1'])
+        self.topology['links'].append({'node': 'pano', 'interface': 'Gi1', 'network': 'mgmt'})
+        self.client.writes.clear()
+        apply(self.client, self.topology)
+        self.assertEqual(str(self.client.ports['2']['7']['network_id']), '1')
+        self.assertEqual(self.client.ports['1'], before)
+        self.assertEqual(len(self.client.writes), 1)
+        self.assertTrue(self.client.writes[0][1].endswith('/nodes/2/interfaces'))
+        self.assertEqual(apply(self.client, self.topology)['changes'], [])
+
+    def test_running_node_management_attachment_remains_deferred(self):
+        self.topology['nodes'].append(dict(self.topology['nodes'][0], name='pano'))
+        apply(self.client, self.topology)
+        self.client.nodes['1']['status'] = 2
+        self.client.nodes['2']['status'] = 2
+        self.topology['links'].append({'node': 'pano', 'interface': 'Gi1', 'network': 'mgmt'})
+        self.client.writes.clear()
+        result = apply(self.client, self.topology)
+        self.assertEqual(str(self.client.ports['2']['7']['network_id']), '0')
+        self.assertEqual(self.client.writes, [])
+        self.assertTrue(result['deferred'])
+
+    def test_running_direct_link_peer_is_preserved(self):
+        topology = self.direct_topology()
+        apply(self.client, topology)
+        before = copy.deepcopy(self.client.ports)
+        self.client.nodes['1']['status'] = 2
+        topology['links'] = []
+        self.client.writes.clear()
+        apply(self.client, topology)
+        self.assertEqual(self.client.ports, before)
+        self.assertEqual(self.client.writes, [])
+
+    def test_apply_aborts_if_node_starts_before_write(self):
+        apply(self.client, self.topology)
+        self.topology['nodes'][0]['ram'] = 4096
+        original = self.client.request
+        reads = []
+        def request(method, path, payload=None):
+            if method == 'GET' and path.endswith('/nodes'):
+                reads.append(path)
+                if len(reads) >= 3:
+                    self.client.nodes['1']['status'] = 2
+            return original(method, path, payload)
+        self.client.request = request
+        self.client.writes.clear()
+        with self.assertRaisesRegex(RuntimeError, 'running state changed'):
+            apply(self.client, self.topology)
         self.assertEqual(self.client.writes, [])
 
     def test_prune_verifies_deletion(self):

@@ -80,7 +80,7 @@ def main():
         if name == "delete":
             command.description = "Stop all remote nodes and permanently delete the entire remote lab. Local files are kept."
         if name == "apply":
-            command.add_argument("--prune", action=argparse.BooleanOptionalAction, default=True, help="Delete undeclared nodes, networks, and stale links (default: enabled); requires stopped nodes")
+            command.add_argument("--prune", action=argparse.BooleanOptionalAction, default=True, help="Reconcile stopped nodes and prune unused objects (default: enabled); preserve running nodes and their networks")
         if name == "start":
             command.add_argument("--node", help="Start only this remote node by exact name")
         if name == "stop":

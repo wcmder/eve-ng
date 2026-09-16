@@ -2,6 +2,7 @@
 
 from urllib.parse import quote
 import time
+import re
 
 from .client import EveAPIError
 from .topology import expand_links, interface_key, validate
@@ -119,10 +120,8 @@ def prune_objects(client, path, topology, changes):
     networks = named(client, path + "/networks")
     keep_nodes = {node["name"] for node in topology["nodes"]}
     keep_networks = {network["name"] for network in topology["networks"]}
-    if any(str(node.get("status")) != "0" for node in nodes.values()):
-        raise RuntimeError("Stop all nodes in the lab before pruning")
     for name, node in nodes.items():
-        if name not in keep_nodes:
+        if name not in keep_nodes and str(node.get("status")) == "0":
             client.request("DELETE", f"{path}/nodes/{node['id']}")
             changes.append(f"pruned node: {name}")
             if name in named(client, path + "/nodes"):
@@ -136,6 +135,8 @@ def prune_objects(client, path, topology, changes):
     declared_networks = {network['name'] for network in topology['networks']}
     retained_network_ids = {network['id'] for name, network in networks.items() if name in declared_networks}
     for node in nodes.values():
+        if str(node.get('status')) != '0':
+            continue
         for ident, port in interfaces(client, path, node).items():
             if ((node['id'], ident) not in desired_ports and
                     str(port.get('network_id', 0)) in retained_network_ids):
@@ -153,6 +154,8 @@ def prune_objects(client, path, topology, changes):
             for ident, port in interfaces(client, path, node).items():
                 if str(port.get("network_id")) == network["id"]:
                     attached.append((node, ident, port["name"]))
+        if any(str(node.get('status')) != '0' for node, _, _ in attached):
+            continue
         # EVE-NG deleteNetwork() unlinks attached interfaces before saving.
         # PUT to network 0 is invalid; interface DELETE is version-dependent.
         if name in named(client, path + "/networks"):
@@ -166,13 +169,91 @@ def prune_objects(client, path, topology, changes):
             changes.append(f"disconnected {node['name']} {port_name} from {name}")
 
 
+def preserve_active(client, path, topology, direct, nodes, networks):
+    """Build a partial desired topology that preserves active nodes and shared links."""
+    active = {name for name, node in nodes.items() if str(node.get('status')) != '0'}
+    if not active:
+        return topology, direct, []
+    ports = {name: interfaces(client, path, node) for name, node in nodes.items()}
+    by_id = {network['id']: name for name, network in networks.items()}
+    protected = {by_id[str(port['network_id'])] for name in active for port in ports[name].values()
+                 if str(port.get('network_id', 0)) in by_id}
+    blocked = {network for network, links in direct if any(link['node'] in active for link in links)}
+    protected |= blocked
+    # Preserve both ends of a direct link when either endpoint's existing network
+    # is protected. Otherwise pruning the stopped end could disrupt a live peer.
+    for network, links in direct:
+        if network in protected:
+            continue
+        if any(any(interface_key(port['name']) == interface_key(link['interface'])
+                       and by_id.get(str(port.get('network_id'))) in protected
+                       for port in ports.get(link['node'], {}).values()) for link in links):
+            blocked.add(network)
+    protected |= blocked
+    # Cloud networks are shared by design. Editing a stopped node's attachment
+    # does not require editing the cloud or any running peer's interfaces.
+    desired_networks = {network['name']: network for network in topology['networks']}
+    shared_clouds = {name for name in protected if name in networks
+                     and re.fullmatch(r'pnet[0-9]+', networks[name].get('type', ''))
+                     and desired_networks.get(name, {}).get('type') == networks[name]['type']
+                     and name not in blocked}
+    frozen_networks = protected - shared_clouds
+    deferred = [{'kind': 'node', 'name': name, 'reason': 'Running node left unchanged'} for name in sorted(active)]
+    deferred += [{'kind': 'network', 'name': name, 'reason': 'Network or direct link associated with a running node left unchanged'}
+                 for name in sorted(protected)]
+    result = {**topology}
+    result['nodes'] = []
+    declared = {node['name'] for node in topology['nodes']}
+    fields = ('name', 'template', 'type', 'image', 'cpu', 'ram', 'ethernet', 'console', 'left', 'top')
+    for desired in topology['nodes'] + [nodes[name] for name in sorted(active - declared)]:
+        name = desired['name']
+        if name in active:
+            result['nodes'].append({key: nodes[name][key] for key in fields if key in nodes[name]})
+        else:
+            desired = dict(desired)
+            if name in nodes and any(by_id.get(str(port.get('network_id'))) in frozen_networks for port in ports[name].values()):
+                if 'ethernet' in desired and str(desired['ethernet']) != str(nodes[name].get('ethernet')):
+                    desired['ethernet'] = nodes[name]['ethernet']
+                    deferred.append({'kind': 'node', 'name': name, 'reason': 'Interface resize deferred: connected to a protected network'})
+            result['nodes'].append(desired)
+    result['networks'] = [network for network in topology['networks'] if network['name'] not in protected]
+    result['networks'] += [{key: networks[name][key] for key in ('name', 'type', 'left', 'top') if key in networks[name]}
+                           for name in sorted(protected) if name in networks]
+    frozen_ports = {(name, interface_key(port['name'])) for name in nodes for port in ports[name].values()
+                    if name in active or by_id.get(str(port.get('network_id'))) in frozen_networks}
+    result['links'] = [link for link in topology['links'] if link['node'] not in active
+                       and link['network'] not in frozen_networks
+                       and (link['node'], interface_key(link['interface'])) not in frozen_ports]
+    result['links'] += [{'node': name, 'interface': port['name'], 'network': by_id[str(port['network_id'])]}
+                        for name in nodes for port in ports[name].values()
+                        if name in {node['name'] for node in result['nodes']}
+                        and (name, interface_key(port['name'])) in frozen_ports and str(port.get('network_id')) in by_id]
+    return result, [(name, links) for name, links in direct if name not in protected], deferred
+
+
 def apply(client, topology, prune=True):
     validate(topology)
     topology, direct = expand_links(topology)
     path = lab_path(topology)
+    folder = topology.get("remote_folder", "/").rstrip("/")
+    client.request("GET", "folders" + quote(folder, safe="/") + "/")
+    try:
+        client.request("GET", path)
+        exists = True
+    except EveAPIError as error:
+        if error.code != 404:
+            raise
+        exists = False
+    nodes = named(client, path + "/nodes") if exists else {}
+    networks = named(client, path + "/networks") if exists else {}
+    deferred = []
+    if prune:
+        topology, direct, deferred = preserve_active(client, path, topology, direct, nodes, networks)
     # Preflight templates/images and network types before creating anything.
     payloads = {}
     for node in topology["nodes"]:
+        if prune and node["name"] in nodes and str(nodes[node["name"]].get("status")) != "0":
+            continue
         template = client.request("GET", "list/templates/" + quote(node["template"], safe=""))
         if template.get("type") != node["type"]:
             raise ValueError(f"Template type does not match {node['name']}")
@@ -189,19 +270,6 @@ def apply(client, topology, prune=True):
     for network in topology["networks"]:
         if network["type"] not in types:
             raise ValueError(f"Unavailable network type: {network['type']}")
-    folder = topology.get("remote_folder", "/").rstrip("/")
-    client.request("GET", "folders" + quote(folder, safe="/") + "/")
-    try:
-        client.request("GET", path)
-        exists = True
-    except EveAPIError as error:
-        if error.code != 404:
-            raise
-        exists = False
-    nodes = named(client, path + "/nodes") if exists else {}
-    networks = named(client, path + "/networks") if exists else {}
-    if prune and any(str(node.get("status")) != "0" for node in nodes.values()):
-        raise RuntimeError("Stop all nodes in the lab before pruning: eve stop <lab>")
     if not prune:
         check_direct_bridges(client, path, direct, nodes, networks)
     updates = []
@@ -218,7 +286,7 @@ def apply(client, topology, prune=True):
                     resources = {key: desired[key] for key in ("type", "left", "top")
                                  if key in desired and str(desired[key]) != str(actual.get(key))}
                     if resources:
-                        if any(str(node.get("status")) != "0" for node in nodes.values()):
+                        if not prune and any(str(node.get("status")) != "0" for node in nodes.values()):
                             raise RuntimeError("Stop all nodes before changing network settings")
                         network_updates.append((desired, actual["id"], resources))
                 check_settings({key: value for key, value in desired.items() if key not in resources}, actual)
@@ -249,6 +317,19 @@ def apply(client, topology, prune=True):
                 if not any(interface_key(port["name"]) == interface_key(link["interface"]) for port in ports.values()):
                     continue
             check_link(client, path, link, nodes, networks, rewire=prune)
+    # Recheck activity before every write, including pruning and bridge edits.
+    # A concurrent start can invalidate the protected-network snapshot.
+    underlying = client
+    active_snapshot = {(node['id'], name) for name, node in nodes.items() if str(node.get('status')) != '0'}
+    class GuardedClient:
+        def request(self, method, endpoint, payload=None):
+            if exists and method in ('POST', 'PUT', 'DELETE'):
+                current = named(underlying, path + '/nodes')
+                active_now = {(node['id'], name) for name, node in current.items() if str(node.get('status')) != '0'}
+                if active_now != active_snapshot:
+                    raise RuntimeError('Node running state changed during apply; rerun to recompute safe changes')
+            return underlying.request(method, endpoint, payload)
+    client = GuardedClient()
     changes = []
     try:
         if not exists:
@@ -258,7 +339,7 @@ def apply(client, topology, prune=True):
             })
             changes.append("created lab")
         for desired, ident, settings in network_updates:
-            if any(str(node.get("status")) != "0" for node in named(client, path + "/nodes").values()):
+            if not prune and any(str(node.get("status")) != "0" for node in named(client, path + "/nodes").values()):
                 raise RuntimeError("Stop all nodes before changing network settings")
             current = named(client, path + "/networks").get(desired["name"])
             if not current or current["id"] != ident:
@@ -337,8 +418,8 @@ def apply(client, topology, prune=True):
             f"Apply did not complete: {error}. Completed: {changes}. "
             "No rollback performed; inspect the lab and rerun after resolving the error."
         ) from error
-    return {"lab": topology["name"], "path": path, "changes": changes,
-            "message": "Applied; no nodes started" if changes else "Already matches; no changes"}
+    return {"lab": topology["name"], "path": path, "changes": changes, "deferred": deferred,
+            "message": "Applied safe changes; deferred objects left unchanged" if deferred else ("Applied; no nodes started" if changes else "Already matches; no changes")}
 
 
 def start_node(client, path, node):
