@@ -34,6 +34,7 @@ Use your actual lab and node names:
 | `eve restore <lab> --from <backup-directory> [--check] [--wipe]` | Upload and enable saved startup configs; optionally wipe restored nodes for initialization. | Yes |
 | `eve templates` | List available device templates. | Yes |
 | `eve template <name>` | Fetch template details, image options, and server defaults. | Yes |
+| `eve securecrt <lab> [--credentials <title>]` | Read hostnames and IPs through device consoles and generate SSH sessions. | API + SSH |
 | `eve securecrt pnet1 [--username admin]` | Generate SecureCRT SSH sessions from DHCP leases and `.env` management IPs. | SSH |
 | `eve nat status pnet1` | Show current NAT rules and managed pnet1 configuration state. | SSH |
 | `eve nat add pnet1 [--dry-run]` | Add runtime Internet NAT through pnet0. | SSH |
@@ -680,6 +681,42 @@ pnet1 lease file without stopping DHCP, creating backups, or changing leases.
 It uses the same `.env` SSH credentials as `clear` below.
 
 ### Generate SecureCRT SSH sessions
+
+For automatic discovery from running devices, use the lab name:
+
+```sh
+eve securecrt palo-lab1 --credentials eve-default
+eve securecrt palo-lab1 --username admin --timeout 120
+```
+
+This mode reads the live node list and native Telnet console URLs from the EVE
+API, then accesses each console through EVE host SSH. It uses `CISCO_*` and
+`PALO_*` credentials from `.env` for device login; it does not read DHCP leases
+or use `*_MANAGEMENT_IP` variables as session targets.
+
+- Cisco c8000v: reads `show ip interface brief`, selects assigned, up/up IPv4
+  interfaces connected to a remote `pnet1` network, and reads the hostname from
+  the privileged CLI prompt.
+- Palo firewalls and Panorama: reads the hostname and management IPv4 address
+  from `show system info`.
+
+Sessions are named `eve/<device-hostname> - <IP>`, with one session per IP, without
+prompts. `--interactive` is only available in the legacy `pnet1` mode below.
+Devices must already be initialized and have Telnet consoles. Discovery does
+not apply configs, change passwords, commit, or start nodes; it authenticates,
+uses enable mode for Cisco, and disables CLI paging to read status. Close other
+console sessions first. Stopped, unsupported (including Linux), uninitialized,
+or inaccessible nodes are reported in `skipped`. If none can be discovered,
+the existing output script is left unchanged. Discovery does not verify that
+SSH is enabled or reachable at the returned address. This mode has automated
+test coverage; live console discovery has not yet been verified.
+
+`--credentials` and `--username` select the generated SecureCRT session login;
+they do not override the `.env` credentials used to read device consoles.
+The generated script still needs to be run inside SecureCRT to create/update
+sessions. It uses the same output path and existing-session behavior described below.
+
+For the existing DHCP and `.env` discovery mode, use `pnet1`:
 
 ```sh
 eve securecrt pnet1

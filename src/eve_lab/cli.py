@@ -16,6 +16,7 @@ from .bootstrap import prepare as prepare_bootstrap
 from .config import load_server
 from .nat import configure as configure_nat
 from .securecrt import generate as generate_securecrt
+from .session_discovery import discover as discover_sessions
 from .dhcp import clear as clear_dhcp, report as report_dhcp, update_dns as update_dhcp_dns
 from .deploy import apply, delete, lab_status, lifecycle, plan
 from .topology import load_lab_target, load_topology
@@ -45,8 +46,9 @@ def main():
     dns.add_argument('interface', nargs='?', default='pnet1', choices=['pnet1'])
     dns.add_argument('--server', default='default')
     dns.add_argument('--dry-run', action='store_true', help='Preview DNS changes without modifying DHCP')
-    securecrt = commands.add_parser("securecrt", help="Generate SSH sessions from the DHCP report")
-    securecrt.add_argument("interface", choices=["pnet1"])
+    securecrt = commands.add_parser("securecrt", help="Generate SSH sessions from lab consoles, or pnet1 DHCP leases")
+    securecrt.add_argument("interface", metavar="LAB_OR_PNET1", help="Lab name for automatic console discovery, or pnet1 for DHCP/.env discovery")
+    securecrt.add_argument("--timeout", type=int, default=60, help="Console login prompt timeout in seconds")
     securecrt.add_argument("--server", default="default")
     securecrt.add_argument("--output", type=Path, help="Output script (default: .state/securecrt-eve.py under root)")
     credential_options = securecrt.add_mutually_exclusive_group()
@@ -98,9 +100,32 @@ def main():
         if args.command == "securecrt":
             if not 1 <= args.port <= 65535:
                 raise ValueError("SSH port must be between 1 and 65535")
-            result = generate_securecrt(report_dhcp(server, args.interface),
+            console_discovery = args.interface != 'pnet1'
+            if not 1 <= args.timeout <= 3600:
+                raise ValueError('--timeout must be between 1 and 3600 seconds')
+            if console_discovery:
+                if args.interactive:
+                    raise ValueError('Lab console discovery names sessions automatically; omit --interactive')
+                topology = load_lab_target(args.root, args.interface)
+                web = load_server(args.root, args.server)
+                client = EveClient(web['url'], web['timeout'])
+                client.login(web['username'], web['password'], html5=False)
+                try:
+                    report = discover_sessions(client, topology, args.root, server, args.timeout)
+                finally:
+                    client.logout()
+                if not report['leases']:
+                    print(json.dumps({'session_count': 0, 'skipped': report['skipped'],
+                                      'message': 'No devices discovered; existing output left unchanged'}, indent=2))
+                    return
+            else:
+                report = report_dhcp(server, args.interface)
+            result = generate_securecrt(report,
                                        args.output or args.root / ".state/securecrt-eve.py",
-                                       args.username, args.port, interactive=args.interactive, credentials=args.credentials, root=args.root)
+                                       args.username, args.port, interactive=args.interactive, credentials=args.credentials,
+                                       root=None if console_discovery else args.root)
+            if console_discovery:
+                result['skipped'] = report['skipped']
             print(json.dumps(result, indent=2))
             return
         if args.command == "dhcp":
