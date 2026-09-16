@@ -81,10 +81,10 @@ interfaces are rewired to match YAML. Deletion
 of undeclared nodes/networks and stale links is enabled by default.
 Use `--no-prune` to keep undeclared objects and connections.
 Canvas positions are preserved when omitted from YAML; explicit positions are applied.
-Network type and explicit position changes are applied when the network is not
-protected by a running node. Stop a node before
-adding a connection. Default apply preserves running nodes and their connected
-networks, reporting them in `deferred`. `start`
+Explicit network positions can be updated while nodes run. Network type changes
+are deferred only when the network has running attachments. Stop a node before
+adding a connection. Default apply preserves running node settings and ports, reporting them in
+`deferred`. Stopped node attachments remain editable on shared networks. `start`
 acts only on declared nodes. `stop` acts on every remote node in the selected lab.
 Run one deployment at a time per remote lab.
 
@@ -113,17 +113,16 @@ and stale attachments are removed before checking direct-link exclusivity.
 With `--no-prune`, conflicting rewires and shared direct-link bridges remain errors.
 Use `eve apply palo-lab --no-prune` for the previous additive behavior.
 
-Pruning skips running nodes, including manually added nodes, and preserves their
-networks and existing attachments at both ends. It updates stopped nodes, creates
-missing objects, and removes undeclared stopped nodes and unprotected networks.
-Stopped or new nodes can connect to existing shared `pnet` clouds (such as
-`mgmt` on `pnet1`) while other nodes run, provided the cloud type is unchanged.
-Running nodes' ports and cloud settings remain untouched. Connections involving
-protected internal bridges and interface resizes on their attached stopped
-nodes are deferred. This conservative behavior keeps live connections intact;
-new nodes may remain disconnected until their protected links can be applied.
-The JSON `deferred` list identifies protected objects. Stop the affected running
-nodes and rerun apply to finish those changes.
+Pruning skips running nodes, including manually added nodes, and leaves their
+interface attachments unchanged. Stopped and new nodes can connect, disconnect,
+rewire, and resize on both cloud and internal bridge networks while peers run.
+Networks have no blanket protection: positions can change, missing networks can
+be created, and undeclared networks without running attachments can be removed.
+Deleting or changing the type of a network with running attachments is deferred
+to avoid disrupting those nodes. A direct link involving a running endpoint may
+be only partly connected; its final visibility/exclusivity check is deferred.
+The JSON `deferred` list reports these exceptions. Stop the affected running
+nodes and rerun apply to finish them.
 Pruning executes without a prompt and includes stopped manually created objects
 absent from YAML. Deleted node data is not backed up automatically. Local files and the
 remote lab itself remain. With `--no-prune`, apply remains additive. Deletions are

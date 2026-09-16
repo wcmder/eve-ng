@@ -2,7 +2,6 @@
 
 from urllib.parse import quote
 import time
-import re
 
 from .client import EveAPIError
 from .topology import expand_links, interface_key, validate
@@ -170,65 +169,45 @@ def prune_objects(client, path, topology, changes):
 
 
 def preserve_active(client, path, topology, direct, nodes, networks):
-    """Build a partial desired topology that preserves active nodes and shared links."""
+    """Preserve running node settings/ports while reconciling stopped peers."""
     active = {name for name, node in nodes.items() if str(node.get('status')) != '0'}
     if not active:
         return topology, direct, []
-    ports = {name: interfaces(client, path, node) for name, node in nodes.items()}
+    ports = {name: interfaces(client, path, nodes[name]) for name in active}
     by_id = {network['id']: name for name, network in networks.items()}
-    protected = {by_id[str(port['network_id'])] for name in active for port in ports[name].values()
-                 if str(port.get('network_id', 0)) in by_id}
-    blocked = {network for network, links in direct if any(link['node'] in active for link in links)}
-    protected |= blocked
-    # Preserve both ends of a direct link when either endpoint's existing network
-    # is protected. Otherwise pruning the stopped end could disrupt a live peer.
-    for network, links in direct:
-        if network in protected:
-            continue
-        if any(any(interface_key(port['name']) == interface_key(link['interface'])
-                       and by_id.get(str(port.get('network_id'))) in protected
-                       for port in ports.get(link['node'], {}).values()) for link in links):
-            blocked.add(network)
-    protected |= blocked
-    # Cloud networks are shared by design. Editing a stopped node's attachment
-    # does not require editing the cloud or any running peer's interfaces.
-    desired_networks = {network['name']: network for network in topology['networks']}
-    shared_clouds = {name for name in protected if name in networks
-                     and re.fullmatch(r'pnet[0-9]+', networks[name].get('type', ''))
-                     and desired_networks.get(name, {}).get('type') == networks[name]['type']
-                     and name not in blocked}
-    frozen_networks = protected - shared_clouds
+    live_networks = {by_id[str(port['network_id'])] for name in active for port in ports[name].values()
+                     if str(port.get('network_id', 0)) in by_id}
     deferred = [{'kind': 'node', 'name': name, 'reason': 'Running node left unchanged'} for name in sorted(active)]
-    deferred += [{'kind': 'network', 'name': name, 'reason': 'Network or direct link associated with a running node left unchanged'}
-                 for name in sorted(protected)]
     result = {**topology}
     result['nodes'] = []
     declared = {node['name'] for node in topology['nodes']}
     fields = ('name', 'template', 'type', 'image', 'cpu', 'ram', 'ethernet', 'console', 'left', 'top')
     for desired in topology['nodes'] + [nodes[name] for name in sorted(active - declared)]:
         name = desired['name']
-        if name in active:
-            result['nodes'].append({key: nodes[name][key] for key in fields if key in nodes[name]})
-        else:
-            desired = dict(desired)
-            if name in nodes and any(by_id.get(str(port.get('network_id'))) in frozen_networks for port in ports[name].values()):
-                if 'ethernet' in desired and str(desired['ethernet']) != str(nodes[name].get('ethernet')):
-                    desired['ethernet'] = nodes[name]['ethernet']
-                    deferred.append({'kind': 'node', 'name': name, 'reason': 'Interface resize deferred: connected to a protected network'})
-            result['nodes'].append(desired)
-    result['networks'] = [network for network in topology['networks'] if network['name'] not in protected]
-    result['networks'] += [{key: networks[name][key] for key in ('name', 'type', 'left', 'top') if key in networks[name]}
-                           for name in sorted(protected) if name in networks]
-    frozen_ports = {(name, interface_key(port['name'])) for name in nodes for port in ports[name].values()
-                    if name in active or by_id.get(str(port.get('network_id'))) in frozen_networks}
-    result['links'] = [link for link in topology['links'] if link['node'] not in active
-                       and link['network'] not in frozen_networks
-                       and (link['node'], interface_key(link['interface'])) not in frozen_ports]
+        result['nodes'].append({key: nodes[name][key] for key in fields if key in nodes[name]}
+                               if name in active else dict(desired))
+    desired_networks = {network['name']: dict(network) for network in topology['networks']}
+    for name in sorted(live_networks):
+        if name not in desired_networks:
+            desired_networks[name] = {key: networks[name][key] for key in ('name', 'type', 'left', 'top') if key in networks[name]}
+            deferred.append({'kind': 'network', 'name': name, 'reason': 'Deletion would disconnect a running node'})
+        elif desired_networks[name]['type'] != networks[name]['type']:
+            desired_networks[name]['type'] = networks[name]['type']
+            deferred.append({'kind': 'network', 'name': name, 'reason': 'Type change would affect a running node'})
+    result['networks'] = list(desired_networks.values())
+    result['links'] = [dict(link) for link in topology['links'] if link['node'] not in active]
     result['links'] += [{'node': name, 'interface': port['name'], 'network': by_id[str(port['network_id'])]}
-                        for name in nodes for port in ports[name].values()
-                        if name in {node['name'] for node in result['nodes']}
-                        and (name, interface_key(port['name'])) in frozen_ports and str(port.get('network_id')) in by_id]
-    return result, [(name, links) for name, links in direct if name not in protected], deferred
+                        for name in sorted(active) for port in ports[name].values()
+                        if str(port.get('network_id')) in by_id]
+    # Stopped endpoints may be connected immediately, but don't hide a bridge
+    # as a completed direct cable while its running endpoint is deferred.
+    ready_direct = []
+    for name, links in direct:
+        if name in live_networks or any(link['node'] in active for link in links):
+            deferred.append({'kind': 'direct-link', 'name': name, 'reason': 'Direct-link visibility/exclusivity check deferred until its running endpoints stop'})
+        else:
+            ready_direct.append((name, links))
+    return result, ready_direct, deferred
 
 
 def apply(client, topology, prune=True):

@@ -239,6 +239,22 @@ class DeploymentTests(unittest.TestCase):
         self.assertTrue(self.client.writes[0][1].endswith('/nodes/2/interfaces'))
         self.assertEqual(apply(self.client, self.topology)['changes'], [])
 
+    def test_stopped_node_can_join_live_internal_bridge(self):
+        self.topology['networks'][0]['type'] = 'bridge'
+        self.test_stopped_node_can_join_live_management_cloud()
+
+    def test_live_network_positions_can_change(self):
+        apply(self.client, self.topology)
+        self.client.nodes['1']['status'] = 2
+        before = copy.deepcopy(self.client.ports)
+        self.topology['networks'][0].update(left=555, top=666)
+        self.client.writes.clear()
+        apply(self.client, self.topology)
+        self.assertEqual(self.client.networks['1']['left'], 555)
+        self.assertEqual(self.client.ports, before)
+        self.assertEqual(len(self.client.writes), 1)
+        self.assertTrue(self.client.writes[0][1].endswith('/networks/1'))
+
     def test_running_node_management_attachment_remains_deferred(self):
         self.topology['nodes'].append(dict(self.topology['nodes'][0], name='pano'))
         apply(self.client, self.topology)
@@ -251,7 +267,7 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(self.client.writes, [])
         self.assertTrue(result['deferred'])
 
-    def test_running_direct_link_peer_is_preserved(self):
+    def test_stopped_direct_link_peer_can_disconnect(self):
         topology = self.direct_topology()
         apply(self.client, topology)
         before = copy.deepcopy(self.client.ports)
@@ -259,8 +275,9 @@ class DeploymentTests(unittest.TestCase):
         topology['links'] = []
         self.client.writes.clear()
         apply(self.client, topology)
-        self.assertEqual(self.client.ports, before)
-        self.assertEqual(self.client.writes, [])
+        self.assertEqual(self.client.ports['1'], before['1'])
+        self.assertTrue(all(str(port['network_id']) == '0' for port in self.client.ports['2'].values()))
+        self.assertTrue(all('/nodes/2/interfaces' in call[1] for call in self.client.writes))
 
     def test_apply_aborts_if_node_starts_before_write(self):
         apply(self.client, self.topology)
