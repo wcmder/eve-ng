@@ -9,8 +9,9 @@ from urllib.parse import quote
 import yaml
 
 from .client import EveClient
-from .backup import backup
-from .restore import restore
+from .backup import backup as api_backup
+from .console_backup import backup
+from .device_restore import restore
 from .initialize import initialize, prepare_panorama_console
 from .bootstrap import prepare as prepare_bootstrap
 from .config import load_server
@@ -74,9 +75,16 @@ def main():
         if name == "restore":
             command.add_argument("--from", dest="backup_source", type=Path, required=True, help="Backup directory containing manifest.json (relative to working directory or absolute)")
             command.add_argument("--check", action="store_true", help="Validate files and preview node mapping without changing the server")
-            command.add_argument("--wipe", action="store_true", help="After verified uploads, erase restored nodes' writable state to initialize from startup configs; nodes must be stopped")
+            command.add_argument('--node', help='Restore one node from the backup')
+            command.add_argument('--timeout', type=int, default=600, help='Console transfer/load/commit timeout in seconds')
+            command.add_argument('--management-ip', help='Palo/Panorama SSH management IP; requires --node')
+            command.add_argument('--transfer-host', help='EVE IPv4 address reachable by devices for SCP; defaults to EVE pnet1 address')
         if name == "backup":
-            command.add_argument("--check", action="store_true", help="Check server export support without exporting or saving files")
+            command.add_argument('--method', choices=['console', 'api'], default='console', help='Default: read devices using .env credentials; api uses EVE export scripts')
+            command.add_argument('--node', help='Back up one node (console method)')
+            command.add_argument('--timeout', type=int, default=600, help='Console prompt/config read timeout in seconds')
+            command.add_argument('--management-ip', help='Palo/Panorama management IP; requires --node (console method)')
+            command.add_argument("--check", action="store_true", help="Preview backup targets without device login or local files")
         if name == "delete":
             command.description = "Stop all remote nodes and permanently delete the entire remote lab. Local files are kept."
         if name == "apply":
@@ -144,7 +152,7 @@ def main():
             result = plan(topology, server)
         else:
             client = EveClient(server["url"], server.get("timeout", 15))
-            if args.command == "init":
+            if args.command in ("init", "backup", "restore"):
                 client.login(server["username"], server["password"], html5=False)
             else:
                 client.login(server["username"], server["password"])
@@ -161,9 +169,14 @@ def main():
                 elif args.command == "bootstrap":
                     result = prepare_bootstrap(client, topology, args.root, args.server, args.node, args.check, args.attach)
                 elif args.command == "restore":
-                    result = restore(client, topology, args.backup_source, check=args.check, wipe=args.wipe)
+                    result = restore(client, topology, args.backup_source, args.root, args.server, args.check, args.node, args.timeout, args.management_ip, args.transfer_host)
                 elif args.command == "backup":
-                    result = backup(client, topology, args.root, check=args.check)
+                    if args.method == 'api':
+                        if args.node or args.management_ip:
+                            raise ValueError('--node/--management-ip require --method console')
+                        result = api_backup(client, topology, args.root, check=args.check)
+                    else:
+                        result = backup(client, topology, args.root, args.server, args.check, args.node, args.timeout, args.management_ip)
                 elif args.command == "delete":
                     result = delete(client, topology)
                 elif args.command in ("start", "stop"):
@@ -183,7 +196,7 @@ def main():
                 except RuntimeError as error:
                     print(f"Logout warning: {error}", file=sys.stderr)
         print(json.dumps(result, indent=2))
-        if args.command in ("backup", "init") and result.get("failed"):
+        if args.command in ("backup", "init", "restore") and result.get("failed"):
             sys.exit(1)
     except (OSError, ValueError, RuntimeError, yaml.YAMLError) as error:
         parser.exit(1, f"Error: {error}\n")

@@ -28,10 +28,10 @@ Use your actual lab and node names:
 | `eve stop <lab> [--node <name>]` | Stop every remote node, or only the named node; skip nodes already stopped. | Yes |
 | `eve delete <lab>` | Stop all remote nodes and permanently delete the entire remote lab. | Yes |
 | `eve status [lab]` | Read server statistics, or a lab's nodes and networks when a lab is provided. | Yes |
-| `eve backup <lab> [--check]` | Export supported node configs through EVE-NG and save local backups; check reports support only. | Yes |
+| `eve backup <lab> [--check]` | Read Cisco/Palo/Panorama configs using device credentials; check previews targets. | Yes |
 | `eve bootstrap <lab> --node <name> [--check] [--attach]` | Prepare experimental Palo 11.2 first-boot ISO; optionally attach to a stopped node. Never wipes or starts it. | Yes |
 | `eve init <lab> [--node <name>] [--check] [--timeout 600]` | Discover console ports, wait for login, apply per-node init files and save/commit. | Yes |
-| `eve restore <lab> --from <backup-directory> [--check] [--wipe]` | Upload and enable saved startup configs; optionally wipe restored nodes for initialization. | Yes |
+| `eve restore <lab> --from <backup-directory> [--node <name>] [--check]` | Import saved configs through device consoles, replace/load, and save/commit. | API + SSH |
 | `eve templates` | List available device templates. | Yes |
 | `eve template <name>` | Fetch template details, image options, and server defaults. | Yes |
 | `eve securecrt <lab> [--credentials <title>]` | Read hostnames and IPs through device consoles and generate SSH sessions. | API + SSH |
@@ -45,8 +45,9 @@ Use your actual lab and node names:
 
 Successful commands print JSON results; progress, skip notices, and errors may
 also be printed. API commands log in and log out using an in-memory session
-cookie. DHCP, NAT, and SecureCRT generation use SSH; init and bootstrap use both
-the API and host SSH when applying changes. Discovery, status, and local plan commands do not modify devices.
+cookie. DHCP and NAT use SSH. Console backup, console-based SecureCRT discovery,
+init, and bootstrap use both the API and host SSH; legacy SecureCRT lease
+discovery uses SSH. Discovery, status, and local plan commands do not modify devices.
 The current implementation loads server configuration and credentials even for
 `plan`. Starting a VM does not mean the guest OS has finished booting.
 
@@ -171,55 +172,71 @@ absent, the command succeeds without changes. If a node cannot be stopped, delet
 aborts; nodes stopped earlier remain stopped. Failures report partial progress.
 The local topology file must still exist and pass validation.
 
-### Back up device configurations through EVE-NG
+### Back up device configurations
 
 ```sh
-eve backup palo-lab --check   # Query support; no exports or local files
-eve backup palo-lab           # Export supported nodes and download their configs
+eve backup palo-lab1 --check             # Preview targets; no device login/files
+eve backup palo-lab1                     # Read running configurations
+eve backup palo-lab1 --node pano         # Back up one device
+eve backup palo-lab1 --timeout 900        # Allow longer console reads
 ```
 
-Uses the EVE-NG web/API credentials in `.env`, without an SSH connection. The CLI
-does not accept device credentials, but EVE's export script still needs console
-access and may require device login credentials; it does not bypass authentication.
-The command inspects all current remote nodes in the lab, including nodes
-added in the GUI. It uses the Community API's exportable configuration list to
-identify support; nodes missing from that list print `Skipped <name> (<template>)`
-with a reason. A failure to retrieve that list is an error, not an unsupported result.
+The default backup method uses our own device login, rather than EVE's export
+scripts. It discovers nodes and native Telnet console URLs through the EVE API,
+connects through EVE host SSH, and authenticates using `CISCO_*` or `PALO_*` from
+`.env`. Devices must be running, initialized, and ready for console access.
+Close other console sessions first. Backup never answers first-boot setup or
+password-change prompts and never applies configs, saves, commits, or wipes nodes.
 
-EVE-NG's published export support includes Catalyst 8000v; Palo Alto is not listed.
-The installed host's capabilities take precedence, so run `--check` once it is
-online. Support for the exact installed version/images has not yet been verified.
-References: [EVE export API](https://www.eve-ng.net/index.php/how-to-eve-ng-api/),
-[EVE Cookbook](https://eve-ng.net/wp-content/uploads/2024/04/EVE-PE-BOOK-6.3-2024.pdf).
-This implementation targets the Community API; Pro config-set endpoints differ.
+- **c8000v:** reads `more system:running-config` and requires the final `end`.
+  Saves IOS configuration as `.cfg`, including running changes not yet saved to NVRAM.
+- **paloalto / panorama:** reads `show config running` with XML operational output
+  enabled, checks for complete XML, then resets XML operational output to off.
+  Saves `.xml`. This captures committed running configuration, not pending
+  candidate edits, VM disks, licenses, logs, or a complete device-state export.
 
-Before exporting, save configuration inside each supported device, e.g. Cisco
-`copy running-config startup-config`. EVE's export may require the node to be
-running and ready for console access. The command does not start, stop, or wipe
-nodes. Export updates EVE's stored startup configuration, then downloads it using
-`GET .../configs/<id>` after a successful `PUT .../nodes/<id>/export`.
-This is a configuration backup, not a VM disk or snapshot backup.
+Both paths disable CLI paging. PAN-OS backup can also use management SSH through
+EVE, using the lab's `init.yaml` mapping or
+`eve backup palo-lab1 --node pano --management-ip 172.16.1.99`.
+SSH host-key checking remains enabled. `.env` API, host SSH, and device credentials
+are separate. `--check` previews transport eligibility without testing credentials
+or boot readiness. Unsupported templates and stopped/unusable console targets are
+skipped; per-device failures do not prevent remaining backups and cause a nonzero
+exit status. No old EVE export is used as a fallback.
 
-Successful exports are saved as:
+Files are saved locally in the repository:
 
 ```text
-labs/palo-lab/configs/backups/<UTC-timestamp>/
-  R0-1.cfg
-  R-A-2.cfg
+labs/palo-lab1/configs/backups/<UTC-timestamp>/
+  rt-0-1.cfg
+  pa-a-3.xml
+  pano-8.xml
   manifest.json
 ```
 
-Filenames include the remote node ID to avoid duplicate-name collisions. Existing
-backups are preserved. Backup directories are gitignored and created with private
-permissions because device configs may contain secrets. Config contents are not
-printed. The manifest records saved, skipped, and failed nodes.
+Filenames use the EVE node name and ID. Each run creates a new directory; existing
+backups remain. Directories use private permissions (`0700`), files use `0600`,
+and backups are gitignored. Config contents are not printed. The manifest records
+saved, skipped, and failed nodes, transport, and configuration format. If no
+configuration is saved, no backup directory is created.
 
-Unsupported nodes do not block other backups. Export/download failures are printed
-and recorded separately, processing continues, and the command exits nonzero if
-any node failed. An empty configuration is a failure. Failed exports never fall
-back to downloading an old stored configuration. If nothing was saved, results
-are printed but no backup directory is created. Palo Alto requires a separate
-device-native backup workflow when the server does not support its export.
+`eve restore` accepts Cisco `.cfg` and Palo/Panorama `.xml` from these backups.
+It loads them directly through device consoles, as described below. XML capture
+validation checks completeness, not full device-state recovery or cross-version
+compatibility. Device-registration authentication keys and trust state are not
+restored by these config backups.
+
+The old EVE export method remains available explicitly:
+
+```sh
+eve backup palo-lab1 --method api --check
+eve backup palo-lab1 --method api
+```
+
+This method uses EVE's advertised export support and server-side scripts, which
+do not receive the local `CISCO_*`/`PALO_*` credentials. It can fail if those scripts
+cannot log into the device. `--node` and `--management-ip` are console-method options.
+API exports use the same timestamped directory layout with `.cfg` files.
 
 ### Initialize devices after lab startup
 
@@ -564,44 +581,72 @@ script does not handle. See [Cisco SSH configuration](https://www.cisco.com/c/en
 Multiline banners/macros and interactive commands
 are not supported. On failure, earlier commands may already have changed the device.
 
-### Restore or initialize from a backup
+### Restore device configurations from a backup
 
-Use a directory created by `eve backup`, containing `manifest.json` and its config
-files. Replace `<UTC-timestamp>` with the actual backup directory name:
-
-```sh
-eve restore palo-lab --from labs/palo-lab/configs/backups/<UTC-timestamp> --check
-eve stop palo-lab
-eve restore palo-lab --from labs/palo-lab/configs/backups/<UTC-timestamp>
-```
-
-The default uploads and enables EVE's stored startup configs. It does not change
-the guest's current configuration or erase its existing writable state. To boot
-the nodes from the backup instead:
+Use a timestamped directory created by `eve backup`, containing `manifest.json`
+and its config files:
 
 ```sh
-eve restore palo-lab --from labs/palo-lab/configs/backups/<UTC-timestamp> --wipe
-eve start palo-lab
+eve restore palo-lab1 --from labs/palo-lab1/configs/backups/<timestamp> --check
+eve restore palo-lab1 --from labs/palo-lab1/configs/backups/<timestamp> --node pano
+eve restore palo-lab1 --from labs/palo-lab1/configs/backups/<timestamp>
 ```
 
-**`--wipe` erases the writable VM state of the restored nodes.** A configuration
-backup does not preserve other disk contents. Restore requires those nodes to be
-stopped and does not stop or start them automatically. Every upload is read back
-and verified before any wipe. `--check`, including with `--wipe`, previews the
-mapping and actions without changing the server; running nodes are shown in the
-preview but must be stopped before executing restore.
+Restore uses the EVE API only to discover and recheck nodes and console URLs.
+It does not call EVE startup-config import/export or wipe endpoints. Target
+devices must be **running and initialized**, with working console credentials
+and IP connectivity to the EVE host for SCP. For fresh nodes, run `eve init`
+first to establish credentials and management networking. Close other console
+sessions before restore. The old `--wipe` option has been removed.
 
-For a new lab, create its nodes with `eve apply <lab>` first, then restore with
-`--wipe` and start it. Files map by exact node name, so remote node IDs may differ
-from the backup. Templates, images, and Ethernet counts must match; older backups
-without image/interface metadata produce compatibility warnings. Missing nodes or
-mismatches fail before uploads. Nodes without advertised startup-config support
-are reported and skipped, including Palo Alto when unsupported by the host.
+- **Cisco c8000v:** imports the complete `.cfg` to bootflash using SCP, verifies
+  its MD5 checksum against the local file, runs `configure replace ... force`,
+  and confirms `write memory`. This replaces configuration instead of merging
+  individual commands, so multiline banners and certificate sections remain files.
+- **Palo firewall / Panorama:** imports the `.xml` using SCP, runs `load config from`
+  in configuration mode, and commits. Load and commit must be confirmed.
 
-This uses the Community web/API credentials in `.env`. Paths are absolute or
-relative to the current working directory. Restore overwrites stored startup
-configs for matched nodes; partial failures report completed actions without
-rollback. Live restore behavior on this host has not been verified.
+Restore replaces device configuration, including saved hostname, networking,
+accounts and service settings. Unlike init, it does not append `.env` network
+settings or recreate your administrator account. Existing candidate edits on
+PAN-OS are replaced. Use the credentials currently on the device in `.env` to
+log in; afterward, credentials from the restored config may take effect. Encrypted
+secrets may require the original device master key. Configuration backups do not
+recreate licenses or Panorama registration/trust state; re-registration may be
+needed on rebuilt firewalls. Device-native load can reject an incompatible backup.
+
+Files map by exact EVE node name, not old node ID. Template, image and Ethernet
+counts must match when metadata is present. Missing metadata produces warnings.
+Complete Cisco configs and PAN-OS XML are validated before device access.
+`--check` reads local files and API metadata only: it does not test device login,
+SCP routing, host trust or whether the device will accept the config. It can
+preview stopped nodes, but applying restore requires them to be running.
+
+Console login uses `CISCO_*` / `PALO_*` credentials, through EVE host SSH as with
+init. Palo/Panorama can instead use management SSH through EVE via `init.yaml`
+or `--node <name> --management-ip <address>`. Prefer serial access when restoring
+management settings, since SSH may disconnect before commit confirmation.
+
+For transfer, the command stages files in a private `0700` directory under
+`/tmp/eve-restore-<random>` on EVE, with files set to `0600`, then the device pulls
+them using the EVE host's `EVE_SSH_USERNAME` / `EVE_SSH_PASSWORD`. Passwords are
+sent only in response to a password prompt, not embedded in SCP commands. New
+SCP host keys are accepted only when their fingerprint matches EVE public keys
+read through the already verified host SSH connection; changed or unverifiable
+keys fail. The default transfer address is EVE's pnet1 IPv4 address. Override it
+with `--transfer-host <IPv4>` if devices must reach EVE through another address.
+
+```sh
+eve restore palo-lab1 --from labs/palo-lab1/configs/backups/<timestamp> \
+  --node pano --transfer-host 172.16.1.1 --timeout 900
+```
+
+`--timeout` defaults to 600 seconds per console transfer/load/commit wait.
+Staged host files are removed afterward; cleanup failures are reported. Imported
+files remain on the devices. Per-device failures are reported and processing
+continues for other nodes; any failure causes a nonzero exit status. Partial
+changes may remain, and no automatic rollback is performed. Restore has automated
+test coverage; live configuration replacement has not yet been validated.
 
 ### pnet1 Internet NAT through pnet0
 
