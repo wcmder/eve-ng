@@ -178,11 +178,20 @@ def panorama_network_commands(root):
         raise ValueError('Set all Panorama network settings in .env: ' + ', '.join(keys))
     # Validate before constructing CLI text, including command-injection characters.
     try:
-        ip, mask, gateway, dns = [str(IPv4Address(values[key])) for key in keys]
+        ip, mask, gateway = [str(IPv4Address(values[key])) for key in keys[:3]]
     except ValueError:
         raise ValueError('Panorama network settings in .env must be IPv4 addresses') from None
+    dns_values = values['PANORAMA_DNS'].split(',')
+    if not 1 <= len(dns_values) <= 2:
+        raise ValueError('PANORAMA_DNS requires one or two comma-separated IPv4 addresses')
+    try:
+        dns = [str(IPv4Address(value.strip())) for value in dns_values]
+    except ValueError:
+        raise ValueError('PANORAMA_DNS requires one or two comma-separated IPv4 addresses') from None
     commands = [f'set deviceconfig system ip-address {ip} netmask {mask} '
-                f'default-gateway {gateway} dns-setting servers primary {dns}']
+                f'default-gateway {gateway} dns-setting servers primary {dns[0]}']
+    if len(dns) == 2:
+        commands.append(f'set deviceconfig system dns-setting servers secondary {dns[1]}')
     validate_panorama_network(commands)
     return commands
 

@@ -171,6 +171,23 @@ class PanoramaInitTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Set all'):
             self.init(check=True)
 
+    @patch.dict('os.environ', {}, clear=True)
+    def test_one_or_two_dns_values(self):
+        (self.root / '.env').write_text('PANORAMA_MANAGEMENT_IP=172.16.1.99\n'
+                                      'PANORAMA_NETMASK=255.255.255.0\n'
+                                      'PANORAMA_GATEWAY=172.16.1.1\n'
+                                      'PANORAMA_DNS=8.8.8.8, 1.1.1.1\n')
+        commands = panorama_network_commands(self.root)
+        self.assertIn('dns-setting servers primary 8.8.8.8', commands[0])
+        self.assertEqual(commands[1], 'set deviceconfig system dns-setting servers secondary 1.1.1.1')
+        with patch.dict('os.environ', {'PANORAMA_DNS': '8.8.8.8'}):
+            self.assertEqual(len(panorama_network_commands(self.root)), 1)
+        for invalid in ('8.8.8.8,', ',1.1.1.1', '8.8.8.8,bad',
+                        '8.8.8.8,1.1.1.1,9.9.9.9', '8.8.8.8,1.1.1.1;commit'):
+            with self.subTest(value=invalid), patch.dict('os.environ', {'PANORAMA_DNS': invalid}):
+                with self.assertRaisesRegex(ValueError, 'PANORAMA_DNS'):
+                    panorama_network_commands(self.root)
+
     @patch('eve_lab.cli.prepare_panorama_console', return_value={'changed': False, 'check': True})
     @patch('eve_lab.cli.load_lab_target', return_value={'name': 'test'})
     @patch('eve_lab.cli.load_server', return_value={'url': 'http://example.invalid', 'timeout': 10, 'username': 'admin', 'password': 'test'})

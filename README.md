@@ -451,8 +451,12 @@ pnet1's current DHCP pool (`172.16.1.100`–`172.16.1.199`):
 PANORAMA_MANAGEMENT_IP=172.16.1.99
 PANORAMA_NETMASK=255.255.255.0
 PANORAMA_GATEWAY=172.16.1.1
-PANORAMA_DNS=1.1.1.1
+PANORAMA_DNS=8.8.8.8,1.1.1.1
 ```
+
+`PANORAMA_DNS` accepts one or two comma-separated IPv4 addresses: primary first,
+then secondary. Two values override both DNS settings from the init file. A
+single value updates primary only and leaves secondary unchanged.
 
 All four values are required when any is set. Shell environment values override
 `.env`; these settings apply to the Panorama node being initialized. Assign a
