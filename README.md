@@ -34,7 +34,7 @@ Use your actual lab and node names:
 | `eve restore <lab> --from <backup-directory> [--check] [--wipe]` | Upload and enable saved startup configs; optionally wipe restored nodes for initialization. | Yes |
 | `eve templates` | List available device templates. | Yes |
 | `eve template <name>` | Fetch template details, image options, and server defaults. | Yes |
-| `eve securecrt pnet1 [--username admin]` | Generate a SecureCRT SSH session import script from DHCP leases. | SSH |
+| `eve securecrt pnet1 [--username admin]` | Generate SecureCRT SSH sessions from DHCP leases and `.env` management IPs. | SSH |
 | `eve nat status pnet1` | Show current NAT rules and managed pnet1 configuration state. | SSH |
 | `eve nat add pnet1 [--dry-run]` | Add runtime Internet NAT through pnet0. | SSH |
 | `eve nat remove pnet1 [--dry-run]` | Remove only the NAT rules managed by this command. | SSH |
@@ -689,7 +689,23 @@ eve securecrt pnet1 --interactive --credentials eve-default
 eve securecrt pnet1 --username admin --port 22 --output .state/securecrt-eve.py
 ```
 
-Fetches the DHCP report over SSH and writes `.state/securecrt-eve.py` by default.
+Fetches the DHCP report over SSH, adds variables ending in `_MANAGEMENT_IP`
+from `.env`, and writes `.state/securecrt-eve.py` by default. For example:
+
+```dotenv
+PANORAMA_MANAGEMENT_IP=172.16.1.99
+PA_A_MANAGEMENT_IP=172.16.1.120
+```
+
+These add `eve/PANORAMA - 172.16.1.99` and `eve/PA_A - 172.16.1.120`.
+The variable prefix supplies the hostname, preserving its case and underscores.
+Interactive mode prompts for these hosts too, with that prefix as the default.
+Shell environment values override `.env`; blank values are ignored and invalid
+IPv4 addresses abort without replacing the output file. Entries are deduplicated
+by IP: an environment entry takes precedence over the DHCP hostname; if multiple
+environment variables share an IP, the last variable in alphabetical order wins.
+These variables add session targets, not device network configuration.
+The existing `PANORAMA_MANAGEMENT_IP` is also used separately by Panorama init.
 Use `--server <name>` for another configured server. The default output directory
 is gitignored. Explicit `--output` paths are relative to your working directory;
 rerunning the generator replaces that output file with the latest report.
@@ -708,7 +724,8 @@ cancels without replacing the output file. Existing SecureCRT sessions are check
 only when you run the generated script. Matching names are updated with the generated IP, port, and login selection.
 Without `--interactive`, names continue to include both hostname and IP.
 
-Only active and permanent lease records are included, with one session per IP.
+Only active and permanent DHCP lease records are included, plus configured
+management IPs regardless of DHCP leases, with one session per IP.
 Missing hostnames fall back to the IP address. DHCP does not identify the EVE lab,
 so sessions share the `eve` folder. Existing session names are matched for updates; no sessions
 are deleted. If DHCP changes an address or hostname, a new session may be created;

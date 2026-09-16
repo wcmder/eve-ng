@@ -43,6 +43,28 @@ class SecureCRTTests(unittest.TestCase):
             exec(compile(source, str(output), 'exec'), {'crt': crt})
             self.assertIn('0 created, 2 updated', crt.Dialog.MessageBox.call_args.args[0])
 
+    @patch.dict('os.environ', {}, clear=True)
+    def test_management_env_merges_and_overrides_dhcp_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / '.env').write_text('PANORAMA_MANAGEMENT_IP=172.16.1.99\n'
+                                     'PA_A_MANAGEMENT_IP=172.16.1.100\n'
+                                     'EMPTY_MANAGEMENT_IP=\nPALO_PASSWORD=secret-value\n')
+            report = {'leases': [{'status': 'active', 'ip_address': '172.16.1.100', 'hostname': 'old'}]}
+            output = root / 'sessions.py'
+            result = generate(report, output, root=root)
+            self.assertEqual(result['sessions'], ['eve/PANORAMA - 172.16.1.99', 'eve/PA_A - 172.16.1.100'])
+            self.assertNotIn('secret-value', output.read_text())
+            with patch.dict('os.environ', {'PANORAMA_MANAGEMENT_IP': '172.16.1.98'}), patch('builtins.input', return_value=''), patch('sys.stderr'):
+                result = generate(report, output, root=root, interactive=True)
+            self.assertEqual(result['sessions'], ['eve/PANORAMA', 'eve/PA_A'])
+            self.assertIn('172.16.1.98', output.read_text())
+            previous = output.read_text()
+            with patch.dict('os.environ', {'PANORAMA_MANAGEMENT_IP': 'invalid'}):
+                with self.assertRaisesRegex(ValueError, 'PANORAMA_MANAGEMENT_IP'):
+                    generate(report, output, root=root)
+            self.assertEqual(output.read_text(), previous)
+
     def test_untrusted_hostname_and_empty_report(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / 'sessions.py'

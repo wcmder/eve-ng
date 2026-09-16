@@ -100,7 +100,7 @@ def main():
                 raise ValueError("SSH port must be between 1 and 65535")
             result = generate_securecrt(report_dhcp(server, args.interface),
                                        args.output or args.root / ".state/securecrt-eve.py",
-                                       args.username, args.port, interactive=args.interactive, credentials=args.credentials)
+                                       args.username, args.port, interactive=args.interactive, credentials=args.credentials, root=args.root)
             print(json.dumps(result, indent=2))
             return
         if args.command == "dhcp":

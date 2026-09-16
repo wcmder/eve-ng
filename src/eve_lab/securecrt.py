@@ -6,16 +6,31 @@ from pathlib import Path
 import re
 import sys
 
+from .device_console import environment_values
 
-def generate(report, output, username=None, port=22, interactive=False, credentials=None):
+
+def generate(report, output, username=None, port=22, interactive=False, credentials=None, root=None):
     if not 1 <= port <= 65535:
         raise ValueError("SSH port must be between 1 and 65535")
     if credentials is not None and not credentials.strip():
         raise ValueError("SecureCRT credential title must not be empty")
     if credentials is not None and username is not None:
         raise ValueError("Use either --credentials or --username; saved credentials supply the username")
+    leases = list(report["leases"])
+    if root is not None:
+        for key, value in sorted(environment_values(Path(root)).items()):
+            if not key.endswith('_MANAGEMENT_IP') or not value.strip():
+                continue
+            hostname = key[:-len('_MANAGEMENT_IP')]
+            if not hostname:
+                raise ValueError('Management IP variable requires a hostname prefix')
+            try:
+                address = str(IPv4Address(value.strip()))
+            except ValueError:
+                raise ValueError(f'{key} must contain a valid IPv4 address') from None
+            leases.append({'status': 'permanent', 'ip_address': address, 'hostname': hostname})
     sessions = {}
-    for lease in report["leases"]:
+    for lease in leases:
         if lease["status"] not in ("active", "permanent"):
             continue
         address = str(IPv4Address(lease["ip_address"]))
