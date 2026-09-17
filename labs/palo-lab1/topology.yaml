@@ -67,15 +67,6 @@ nodes:
     ram: 12288
     ethernet: 4
 
-  - name: pano
-    template: panorama
-    type: qemu
-    console: telnet
-    image: panorama-12.1.5
-    cpu: 8
-    ram: 32768
-    ethernet: 4
-
   - name: pano4
     type: qemu
     template: panorama
@@ -118,10 +109,6 @@ links:
 
   - node: pa-c
     interface: mgmt
-    network: mgmt
-
-  - node: pano
-    interface: e0
     network: mgmt
 
   - node: pano4
