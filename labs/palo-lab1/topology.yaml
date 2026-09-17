@@ -45,7 +45,7 @@ nodes:
     type: qemu
     console: telnet
     image: paloalto-12.1.7
-    cpu: 6
+    cpu: 4
     ram: 12288
     ethernet: 4
 
@@ -54,7 +54,7 @@ nodes:
     type: qemu
     console: telnet
     image: paloalto-12.1.7
-    cpu: 6
+    cpu: 4
     ram: 12288
     ethernet: 4
 
@@ -63,7 +63,7 @@ nodes:
     type: qemu
     console: telnet
     image: paloalto-12.1.7
-    cpu: 6
+    cpu: 4
     ram: 12288
     ethernet: 4
 
@@ -75,6 +75,15 @@ nodes:
     cpu: 8
     ram: 32768
     ethernet: 4
+
+  - name: pano4
+    type: qemu
+    template: panorama
+    image: panorama-12.1.2
+    cpu: 8
+    ram: 32768
+    ethernet: 4
+    console: telnet
 
 networks:
 
@@ -112,6 +121,10 @@ links:
     network: mgmt
 
   - node: pano
+    interface: e0
+    network: mgmt
+
+  - node: pano4
     interface: e0
     network: mgmt
 

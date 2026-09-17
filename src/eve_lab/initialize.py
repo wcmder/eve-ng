@@ -10,7 +10,7 @@ import paramiko
 
 from .config import load_server
 from .deploy import lab_path, named
-from .device_console import Console, credentials, environment_values
+from .device_console import Console, credentials
 from .palo_ssh import management_targets, connect_palo
 
 
@@ -158,7 +158,7 @@ def validate_panorama_network(commands):
         if match:
             values['dns'] = match.group(1)
     if set(values) != {'ip-address', 'netmask', 'default-gateway', 'dns'}:
-        raise ValueError('Panorama factory init needs static management IP, netmask, gateway and DNS in PANORAMA_* .env settings or its init file')
+        raise ValueError('Panorama factory init needs static management IP, netmask, gateway and DNS in its init file')
     try:
         for value in values.values():
             IPv4Address(value)
@@ -167,33 +167,6 @@ def validate_panorama_network(commands):
             raise ValueError('Gateway outside management subnet')
     except ValueError:
         raise ValueError('Invalid Panorama static management network configuration') from None
-
-
-def panorama_network_commands(root):
-    values = environment_values(root)
-    keys = ('PANORAMA_MANAGEMENT_IP', 'PANORAMA_NETMASK', 'PANORAMA_GATEWAY', 'PANORAMA_DNS')
-    if not any(values.get(key) for key in keys):
-        return []
-    if not all(values.get(key) for key in keys):
-        raise ValueError('Set all Panorama network settings in .env: ' + ', '.join(keys))
-    # Validate before constructing CLI text, including command-injection characters.
-    try:
-        ip, mask, gateway = [str(IPv4Address(values[key])) for key in keys[:3]]
-    except ValueError:
-        raise ValueError('Panorama network settings in .env must be IPv4 addresses') from None
-    dns_values = values['PANORAMA_DNS'].split(',')
-    if not 1 <= len(dns_values) <= 2:
-        raise ValueError('PANORAMA_DNS requires one or two comma-separated IPv4 addresses')
-    try:
-        dns = [str(IPv4Address(value.strip())) for value in dns_values]
-    except ValueError:
-        raise ValueError('PANORAMA_DNS requires one or two comma-separated IPv4 addresses') from None
-    commands = [f'set deviceconfig system ip-address {ip} netmask {mask} '
-                f'default-gateway {gateway} dns-setting servers primary {dns[0]}']
-    if len(dns) == 2:
-        commands.append(f'set deviceconfig system dns-setting servers secondary {dns[1]}')
-    validate_panorama_network(commands)
-    return commands
 
 
 def config_commands(path, template):
@@ -247,10 +220,8 @@ def initialize(client, topology, root, server_name, node_name=None, check=False,
             print(f'Skipped {name}: {reason}', file=sys.stderr)
             continue
         commands = config_commands(path, template)
-        if template == 'panorama':
-            commands += panorama_network_commands(root)
-            if not address:
-                validate_panorama_network(commands)
+        if template == 'panorama' and not address:
+            validate_panorama_network(commands)
         url = urlsplit(node.get('url', ''))
         if not address and (node.get('console') != 'telnet' or url.scheme != 'telnet' or not url.port):
             raise ValueError('No Telnet console URL advertised for ' + name)

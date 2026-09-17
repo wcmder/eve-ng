@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from eve_lab.initialize import PanoramaConsole, initialize, prepare_panorama_console, panorama_network_commands
+from eve_lab.initialize import PanoramaConsole, initialize, prepare_panorama_console
 
 
 NETWORK = ('set deviceconfig system ip-address 172.16.1.50 netmask 255.255.255.0 '
@@ -136,7 +136,9 @@ class PanoramaInitTests(unittest.TestCase):
     @patch('eve_lab.initialize.credentials', return_value=['admin', 'new-secret'])
     @patch('eve_lab.initialize.load_server', return_value={'url': 'http://10.0.4.4', 'ssh_username': 'root', 'ssh_password': 'test'})
     def test_execution_preserves_configured_hostname_and_services(self, server, creds, ssh, console):
-        configured = [NETWORK.strip(), 'set deviceconfig system hostname custom-panorama',
+        (self.root / '.env').write_text('PANORAMA_MANAGEMENT_IP=172.16.1.99\nPANORAMA_DNS=invalid\n')
+        configured = [NETWORK.strip(), 'set deviceconfig system dns-setting servers secondary 8.8.8.8',
+                      'set deviceconfig system hostname custom-panorama',
                       'set deviceconfig system service disable-ssh yes']
         self.config.write_text('\n'.join(configured))
         result = self.init()
@@ -154,39 +156,14 @@ class PanoramaInitTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'commit not confirmed'):
             console.initialize([NETWORK.strip()])
 
-    @patch.dict('os.environ', {}, clear=True)
-    def test_network_env_validated_and_shell_overrides_file(self):
-        settings = ('PANORAMA_MANAGEMENT_IP=172.16.1.50\nPANORAMA_NETMASK=255.255.255.0\n'
-                    'PANORAMA_GATEWAY=172.16.1.1\nPANORAMA_DNS=1.1.1.1\n')
-        (self.root / '.env').write_text(settings)
-        self.config.write_text('# Optional additional commands\n')
-        self.assertEqual(self.init(check=True)['planned'][0]['node'], 'pano')
-        with patch.dict('os.environ', {'PANORAMA_MANAGEMENT_IP': '172.16.1.51'}):
-            self.assertIn('ip-address 172.16.1.51 ', panorama_network_commands(self.root)[0])
-        for invalid in ('bad;command', '172.16.1.50\ncommit'):
-            with patch.dict('os.environ', {'PANORAMA_MANAGEMENT_IP': invalid}):
-                with self.assertRaises(ValueError):
-                    panorama_network_commands(self.root)
-        (self.root / '.env').write_text('PANORAMA_MANAGEMENT_IP=172.16.1.50\n')
-        with self.assertRaisesRegex(ValueError, 'Set all'):
-            self.init(check=True)
-
-    @patch.dict('os.environ', {}, clear=True)
-    def test_one_or_two_dns_values(self):
+    def test_network_environment_cannot_replace_missing_config(self):
         (self.root / '.env').write_text('PANORAMA_MANAGEMENT_IP=172.16.1.99\n'
                                       'PANORAMA_NETMASK=255.255.255.0\n'
                                       'PANORAMA_GATEWAY=172.16.1.1\n'
-                                      'PANORAMA_DNS=8.8.8.8, 1.1.1.1\n')
-        commands = panorama_network_commands(self.root)
-        self.assertIn('dns-setting servers primary 8.8.8.8', commands[0])
-        self.assertEqual(commands[1], 'set deviceconfig system dns-setting servers secondary 1.1.1.1')
-        with patch.dict('os.environ', {'PANORAMA_DNS': '8.8.8.8'}):
-            self.assertEqual(len(panorama_network_commands(self.root)), 1)
-        for invalid in ('8.8.8.8,', ',1.1.1.1', '8.8.8.8,bad',
-                        '8.8.8.8,1.1.1.1,9.9.9.9', '8.8.8.8,1.1.1.1;commit'):
-            with self.subTest(value=invalid), patch.dict('os.environ', {'PANORAMA_DNS': invalid}):
-                with self.assertRaisesRegex(ValueError, 'PANORAMA_DNS'):
-                    panorama_network_commands(self.root)
+                                      'PANORAMA_DNS=8.8.8.8,1.1.1.1\n')
+        self.config.write_text('# No network configuration\n')
+        with self.assertRaisesRegex(ValueError, 'in its init file'):
+            self.init(check=True)
 
     @patch('eve_lab.cli.prepare_panorama_console', return_value={'changed': False, 'check': True})
     @patch('eve_lab.cli.load_lab_target', return_value={'name': 'test'})

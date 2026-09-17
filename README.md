@@ -291,9 +291,8 @@ performed by `--check`.
   password change, applies the `.cfg`, and verifies the commit. Management DHCP,
   hostname, and SSH/HTTPS settings must be supplied in the `.cfg` when desired.
 - **panorama:** uses the same PAN-OS serial login and commit flow as firewalls.
-  Hostname and SSH/HTTPS settings come from the `.cfg`. The `PANORAMA_*` management
-  network settings in `.env` are appended after the file and take precedence
-  over its corresponding IP, netmask, gateway, and DNS settings.
+  Hostname, SSH/HTTPS, management IP, netmask, gateway, and DNS settings come
+  from the per-node `.cfg`. Credentials come from `.env`.
 
 For both PAN-OS templates, serial login tries configured credentials first and,
 on an explicit authentication failure for `admin`, tries factory credentials
@@ -475,28 +474,21 @@ set deviceconfig system service disable-https no
 This serial workflow does not require a bootstrap ISO. SSH initialization continues
 to require working management connectivity and the configured credentials.
 
-Set Panorama management networking in `.env`. This example address is outside
-pnet1's current DHCP pool (`172.16.1.100`–`172.16.1.199`):
+Set Panorama management networking in `labs/<lab>/configs/<node>-init.cfg`.
+The prepared `labs/palo-lab1/configs/pano-init.cfg` includes:
 
-```dotenv
-PANORAMA_MANAGEMENT_IP=172.16.1.99
-PANORAMA_NETMASK=255.255.255.0
-PANORAMA_GATEWAY=172.16.1.1
-PANORAMA_DNS=8.8.8.8,1.1.1.1
+```text
+set deviceconfig system ip-address 172.16.1.99 netmask 255.255.255.0 default-gateway 172.16.1.1
+set deviceconfig system dns-setting servers primary 8.8.8.8
+set deviceconfig system dns-setting servers secondary 1.1.1.1
 ```
 
-`PANORAMA_DNS` accepts one or two comma-separated IPv4 addresses: primary first,
-then secondary. Two values override both DNS settings from the init file. A
-single value updates primary only and leaves secondary unchanged.
-
-All four values are required when any is set. Shell environment values override
-`.env`; these settings apply to the Panorama node being initialized. Assign a
-different address when initializing another Panorama. They override management
-network commands in `configs/<node>-init.cfg`. The prepared
-`labs/palo-lab1/configs/pano-init.cfg` sets the hostname and management SSH/HTTPS access.
-Edit these configuration-mode `set`/`delete` commands as needed; init does not
-automatically override hostname or management service settings. IP values are
-validated before any device login; `.env` remains gitignored.
+This address is outside pnet1's current DHCP pool (`172.16.1.100`–`172.16.1.199`).
+Use a separate `<node>-init.cfg` with a distinct IP for each Panorama.
+Init applies the file and commits; it does not read `PANORAMA_*` network settings
+from `.env` or override the file's hostname, management services, or networking.
+Administrator credentials still come from `PALO_USERNAME`/`PALO_PASSWORD` in `.env`.
+The prepared file also enables management SSH/HTTPS and sets the hostname.
 
 Panorama's documented management interface does not support the VM-Series
 DHCP-client configuration. Connecting `pano.e0` to `pnet1` does not enable DHCP.
@@ -516,7 +508,7 @@ the configured credentials first; if authentication explicitly fails for `admin`
 it tries `admin/admin` once and handles the mandatory old/new/confirm password
 prompts using `PALO_PASSWORD`. An already-initialized device uses the configured
 credentials without a factory-password attempt. It does not reset the node. The command waits
-for prompts, applies the init file and management network settings from `.env`,
+for prompts and applies the init file,
 and commits. Hostname and SSH/HTTPS settings come from the init file. Success requires confirmation of the
 commit; a failure may leave a changed password or candidate configuration.
 Repeated password-change prompts fail without logging secrets. If initialization
@@ -726,7 +718,7 @@ dhcp-option=option:dns-server,8.8.8.8,1.1.1.1
 Include this option when rebuilding the host's DHCP service. Existing clients
 receive the new DNS servers on DHCP renewal; changing this option does not clear
 their leases. Panorama's static DNS is configured separately through
-`PANORAMA_DNS` in `.env`.
+DNS commands in its `configs/<node>-init.cfg`.
 
 ### Report pnet1 DHCP leases
 
@@ -805,7 +797,8 @@ IPv4 addresses abort without replacing the output file. Entries are deduplicated
 by IP: an environment entry takes precedence over the DHCP hostname; if multiple
 environment variables share an IP, the last variable in alphabetical order wins.
 These variables add session targets, not device network configuration.
-The existing `PANORAMA_MANAGEMENT_IP` is also used separately by Panorama init.
+An optional `PANORAMA_MANAGEMENT_IP` here is only a SecureCRT session target;
+Panorama init reads its network configuration from its `.cfg` file.
 Use `--server <name>` for another configured server. The default output directory
 is gitignored. Explicit `--output` paths are relative to your working directory;
 rerunning the generator replaces that output file with the latest report.
