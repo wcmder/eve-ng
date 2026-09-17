@@ -925,13 +925,19 @@ key checking. Update `.env` if the rebuilt VM also has a different SSH password.
 
 ### Deployment errors
 
-For `Failed to create network (11)` during start, the CLI waits 1 second and
-rechecks the node before retrying, then waits 2 seconds before a final attempt.
-After the third network error, it waits 3 seconds and checks the node status
-once more before reporting failure. If any of these checks reports running,
-start succeeds without another request. Other API failures are not retried;
-persistent network-creation failures are reported after three attempts.
-This handles transient failures but does not repair the host's network setup.
+For `Failed to create network (11)` during start, the CLI allows at least three
+attempts, or one per distinct attached network plus a final attempt, capped at
+16 attempts. It waits 1 second after the first error, 2 seconds after the second,
+and 3 seconds after later errors, checking live state each time, including after
+the final error. It stops retrying once the node is running. Other API errors are
+not retried. Retry progress and recovery warnings appear on stderr.
+
+On the inspected host, EVE created bridges but failed while setting
+`group_fwd_mask=65535`; later attempts reused those partially created bridges.
+A node with several attached networks can therefore need more than three attempts.
+Retries do not repair bridge forwarding or prove that all Layer-2 protocols work.
+For recurring errors inspect `/opt/unetlab/data/Logs/unl_wrapper.txt` and the host
+kernel/bridge settings, even if nodes eventually start.
 
 HTTP failures include the server's JSON error message when available. A timeout
 identifies the request and does not imply that the server cancelled it. The default

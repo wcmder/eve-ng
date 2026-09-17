@@ -45,7 +45,7 @@ nodes:
     type: qemu
     console: telnet
     image: paloalto-12.1.7
-    cpu: 4
+    cpu: 6
     ram: 12288
     ethernet: 4
 
@@ -54,7 +54,7 @@ nodes:
     type: qemu
     console: telnet
     image: paloalto-12.1.7
-    cpu: 4
+    cpu: 6
     ram: 12288
     ethernet: 4
 
@@ -63,7 +63,7 @@ nodes:
     type: qemu
     console: telnet
     image: paloalto-12.1.7
-    cpu: 4
+    cpu: 6
     ram: 12288
     ethernet: 4
 

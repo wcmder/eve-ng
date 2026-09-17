@@ -2,6 +2,7 @@
 
 from urllib.parse import quote
 import time
+import sys
 
 from .client import EveAPIError
 from .topology import expand_links, interface_key, validate
@@ -402,24 +403,42 @@ def apply(client, topology, prune=True):
 
 
 def start_node(client, path, node):
-    """Retry only EVE-NG's transient network-creation failure, at most twice."""
-    for attempt in range(3):
+    """Bound network-error retries by attached networks, checking state each time."""
+    attempts = 3
+    attempt = 0
+    while attempt < attempts:
+        attempt += 1
         try:
             client.request("GET", f"{path}/nodes/{node['id']}/start")
+            if attempt > 1:
+                print(f"{node['name']} started after {attempt} attempts. EVE reported network creation errors; "
+                      "successful start does not verify bridge forwarding settings.", file=sys.stderr, flush=True)
             return
         except EveAPIError as error:
             if error.code != 400 or "Failed to create network (11)" not in str(error):
                 raise
-            time.sleep(attempt + 1)
+            if attempt == 1:
+                # EVE can leave one newly created bridge behind per failed start.
+                # Allow one attempt per attached network plus a final start,
+                # while retaining a fixed upper limit for persistent failures.
+                ports = interfaces(client, path, node)
+                networks = {str(port.get('network_id')) for port in ports.values()
+                            if str(port.get('network_id', 0)) not in ('0', '', 'None')}
+                attempts = max(3, min(16, len(networks) + 1))
+            print(f"{node['name']}: EVE network creation error on attempt {attempt}/{attempts}; "
+                  "waiting and checking node status...", file=sys.stderr, flush=True)
+            time.sleep(min(attempt, 3))
             current = indexed(client.request("GET", path + "/nodes")).get(node["id"])
             if current is None or current.get("name") != node["name"]:
                 raise RuntimeError(f"Node {node['name']} changed or disappeared during start") from error
             if str(current.get("status")) == "2":
+                print(f"{node['name']} is running despite the network error; inspect EVE bridge forwarding settings.",
+                      file=sys.stderr, flush=True)
                 return
             if str(current.get("status")) != "0":
                 raise RuntimeError(f"Node {node['name']} has status {current.get('status')}; not retrying start") from error
-            if attempt == 2:
-                raise RuntimeError(f"{node['name']} failed to start after 3 attempts; EVE still reports it stopped: {error}") from error
+            if attempt == attempts:
+                raise RuntimeError(f"{node['name']} failed to start after {attempts} attempts; EVE still reports it stopped: {error}") from error
 
 
 def lifecycle(client, topology, action, node_name=None):

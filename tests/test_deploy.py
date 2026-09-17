@@ -587,6 +587,38 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(len(attempts), 2)
         self.assertEqual(result["changed_nodes"], ["R1"])
 
+    def test_start_allows_one_failure_per_network_then_starts(self):
+        apply(self.client, self.topology)
+        self.client.ports['1'] = {str(i): {'name': 'Gi' + str(i), 'network_id': i} for i in range(1, 5)}
+        original = self.client.request
+        attempts = []
+        def request(method, path, payload=None):
+            if path.endswith('/start'):
+                attempts.append(path)
+                if len(attempts) <= 4:
+                    raise EveAPIError('Failed to create network (11).', 400)
+            return original(method, path, payload)
+        self.client.request = request
+        with patch('eve_lab.deploy.time.sleep'), patch('sys.stderr'):
+            result = lifecycle(self.client, self.topology, 'start')
+        self.assertEqual(len(attempts), 5)
+        self.assertEqual(result['changed_nodes'], ['R1'])
+
+    def test_start_network_retries_have_hard_limit(self):
+        apply(self.client, self.topology)
+        self.client.ports['1'] = {str(i): {'name': 'Gi' + str(i), 'network_id': i} for i in range(1, 40)}
+        original = self.client.request
+        attempts = []
+        def request(method, path, payload=None):
+            if path.endswith('/start'):
+                attempts.append(path)
+                raise EveAPIError('Failed to create network (11).', 400)
+            return original(method, path, payload)
+        self.client.request = request
+        with patch('eve_lab.deploy.time.sleep'), patch('sys.stderr'), self.assertRaisesRegex(RuntimeError, '16 attempts'):
+            lifecycle(self.client, self.topology, 'start')
+        self.assertEqual(len(attempts), 16)
+
     def test_start_retry_is_bounded_and_specific(self):
         for message, code, count in (("Failed to create network (11).", 400, 3),
                                      ("Unauthorized", 401, 1),
