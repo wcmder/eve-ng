@@ -49,7 +49,10 @@ cookie. DHCP and NAT use SSH. Console backup, console-based SecureCRT discovery,
 init, and bootstrap use both the API and host SSH; legacy SecureCRT lease
 discovery uses SSH. Discovery, status, and local plan commands do not modify devices.
 The current implementation loads server configuration and credentials even for
-`plan`. Starting a VM does not mean the guest OS has finished booting.
+`plan`. After start requests, the CLI polls selected nodes once per second (up to 30
+waits) and requires three consecutive running observations before reporting
+success. A stopped/exited VM produces an error listing current running and
+non-running nodes. This verifies VM process state, not guest boot completion.
 
 ### Deploy a lab
 

@@ -108,6 +108,9 @@ class FakeEve:
 
 class DeploymentTests(unittest.TestCase):
     def setUp(self):
+        sleeper = patch('eve_lab.deploy.time.sleep')
+        sleeper.start()
+        self.addCleanup(sleeper.stop)
         # Keep deployment tests independent of the user's evolving lab files.
         self.topology = {
             "name": "palo-lab", "remote_folder": "/",
@@ -618,6 +621,55 @@ class DeploymentTests(unittest.TestCase):
         with patch('eve_lab.deploy.time.sleep'), patch('sys.stderr'), self.assertRaisesRegex(RuntimeError, '16 attempts'):
             lifecycle(self.client, self.topology, 'start')
         self.assertEqual(len(attempts), 16)
+
+    def test_successful_api_response_with_stopped_vm_fails_verification(self):
+        apply(self.client, self.topology)
+        original = self.client.request
+        def request(method, path, payload=None):
+            if path.endswith('/start'):
+                return None
+            return original(method, path, payload)
+        self.client.request = request
+        with self.assertRaisesRegex(RuntimeError, "not running:.*R1"):
+            lifecycle(self.client, self.topology, 'start')
+
+    def test_start_waits_for_delayed_running_status(self):
+        apply(self.client, self.topology)
+        original = self.client.request
+        started = False
+        polls = []
+        def request(method, path, payload=None):
+            nonlocal started
+            if path.endswith('/start'):
+                started = True
+                return None
+            if path.endswith('/nodes') and started:
+                polls.append(path)
+                if len(polls) >= 3:
+                    self.client.nodes['1']['status'] = 2
+            return original(method, path, payload)
+        self.client.request = request
+        result = lifecycle(self.client, self.topology, 'start')
+        self.assertEqual(result['changed_nodes'], ['R1'])
+        self.assertEqual(len(polls), 5)
+
+    def test_start_detects_vm_exiting_after_first_running_sample(self):
+        apply(self.client, self.topology)
+        original = self.client.request
+        started = False
+        polls = []
+        def request(method, path, payload=None):
+            nonlocal started
+            if path.endswith('/start'):
+                started = True
+            elif path.endswith('/nodes') and started:
+                polls.append(path)
+                if len(polls) > 1:
+                    self.client.nodes['1']['status'] = 0
+            return original(method, path, payload)
+        self.client.request = request
+        with self.assertRaisesRegex(RuntimeError, 'Start verification failed'):
+            lifecycle(self.client, self.topology, 'start')
 
     def test_start_retry_is_bounded_and_specific(self):
         for message, code, count in (("Failed to create network (11).", 400, 3),

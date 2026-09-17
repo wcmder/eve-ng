@@ -441,6 +441,27 @@ def start_node(client, path, node):
                 raise RuntimeError(f"{node['name']} failed to start after {attempts} attempts; EVE still reports it stopped: {error}") from error
 
 
+
+def verify_started(client, path, targets):
+    """Require three consecutive running observations, not just an accepted start."""
+    stable = 0
+    current = {}
+    for poll in range(31):
+        current = indexed(client.request('GET', path + '/nodes'))
+        if any(ident not in current or current[ident].get('name') != name for ident, name in targets.items()):
+            raise RuntimeError('Selected node changed or disappeared during startup verification')
+        active = all(str(current[ident].get('status')) == '2' for ident in targets)
+        stable = stable + 1 if active else 0
+        if stable >= 3:
+            return
+        if poll < 30:
+            time.sleep(1)
+    stopped = [name for ident, name in targets.items() if str(current[ident].get('status')) != '2']
+    running = [name for ident, name in targets.items() if str(current[ident].get('status')) == '2']
+    raise RuntimeError(f'Start verification failed: not running: {stopped}; currently running: {running}. '
+                       'Inspect EVE wrapper logs; an accepted start request does not confirm a running VM')
+
+
 def lifecycle(client, topology, action, node_name=None):
     if action not in ("start", "stop"):
         raise ValueError(f"Unsupported action: {action}")
@@ -461,7 +482,9 @@ def lifecycle(client, topology, action, node_name=None):
             start_node(client, path, node)
             completed.append(desired["name"])
     except RuntimeError as error:
-        raise RuntimeError(f"{action} failed: {error}; completed nodes: {completed}") from error
+        raise RuntimeError(f"{action} failed: {error}; accepted start requests: {completed}") from error
+    if desired_nodes:
+        verify_started(client, path, {nodes[item['name']]['id']: item['name'] for item in desired_nodes})
     return {"lab": topology["name"], "action": action, "changed_nodes": completed}
 
 
