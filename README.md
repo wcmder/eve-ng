@@ -1,8 +1,10 @@
 # EVE-NG labs
 
-Shared Python tooling for `http://10.0.4.4`, with independent lab definitions.
+Shared Python tooling for EVE-NG, with independent lab definitions.
 
 ## Setup
+
+Requires Python 3.11 or newer. Run these commands from the repository root:
 
 ```sh
 python3 -m venv .venv
@@ -10,9 +12,67 @@ source .venv/bin/activate
 python -m pip install -e .
 ```
 
-The local, gitignored `.env` contains the supplied credentials. For another checkout,
-copy `.env.example` to `.env` and fill in the passwords. Shell environment variables
-override `.env`. Server addresses belong in `config/servers.yaml`.
+Create your local credentials file on a new checkout (keep an existing `.env`):
+
+```sh
+cp .env.example .env
+```
+
+Fill in your EVE-NG web/API and host SSH usernames and passwords. Set `CISCO_*`
+and `PALO_*` credentials when using device initialization, backup, or restore.
+The `.env` file is gitignored; do not share it. Shell environment variables override
+`.env`. Enter values without surrounding quotes.
+
+### Configure your EVE-NG address
+
+Edit `config/servers.yaml` and replace the checked-in `url` with your own EVE-NG
+web address, including `http://` or `https://` and a port if needed. For example,
+replace `eve.example.com` below with your server's IP address or hostname:
+
+```yaml
+servers:
+  default:
+    url: http://eve.example.com
+    username_env: EVE_USERNAME
+    password_env: EVE_PASSWORD
+    timeout: 120
+    ssh_username_env: EVE_SSH_USERNAME
+    ssh_password_env: EVE_SSH_PASSWORD
+```
+
+SSH uses the URL's host by default. If SSH uses a different IP or hostname, add
+`ssh_host: your-ssh-host` under `default`. The address is read from this YAML file,
+not an `EVE_HOST` or `EVE_URL` variable in `.env`. You can add other named entries
+under `servers` and select one with `--server <name>` after the subcommand.
+
+In SSH examples below, replace `<eve-host>` with your SSH IP or hostname and
+replace `root` if your `EVE_SSH_USERNAME` differs. Verify and trust the host key
+before running commands that use SSH:
+
+```sh
+ssh root@'<eve-host>'
+```
+
+Check your API connection without changing the server:
+
+```sh
+eve status --server default
+```
+
+### Adapt the lab network
+
+The EVE-NG host address and guest device management addresses are separate.
+The `172.16.1.x` addresses, gateway, and DHCP pool shown below describe the example
+lab; substitute your own management subnet and device addresses. Review the
+selected lab's `configs/*-init.cfg` files before initialization, especially static
+IPs, netmasks, gateways, and DNS servers. Also update any management addresses in
+`labs/<lab>/init.yaml`, `.env` `*_MANAGEMENT_IP` entries, or command-line options.
+Changing the server URL does not change these guest settings.
+
+Check `labs/<lab>/topology.yaml` for images installed on your server and the correct
+cloud network (the example uses `pnet1` for management). DHCP helpers require the
+dedicated dnsmasq service/configuration described below; they do not provision it
+on a new EVE-NG host.
 
 ## Commands
 
@@ -326,10 +386,11 @@ set deviceconfig system service disable-ssh no
 commit
 ```
 
-From your Mac, verify and trust the firewall's SSH host key once (replace the IP):
+From your workstation, verify and trust the firewall's SSH host key once
+(replace `<eve-host>` and the firewall IP with your own addresses):
 
 ```sh
-ssh -J root@10.0.4.4 admin@172.16.1.134
+ssh -J root@'<eve-host>' admin@172.16.1.134
 ```
 
 This saves the firewall key in the Mac's known_hosts, which `eve init` also checks.
@@ -483,7 +544,8 @@ set deviceconfig system dns-setting servers primary 8.8.8.8
 set deviceconfig system dns-setting servers secondary 1.1.1.1
 ```
 
-This address is outside pnet1's current DHCP pool (`172.16.1.100`–`172.16.1.199`).
+In the example lab, this address is outside the DHCP pool (`172.16.1.100`–`172.16.1.199`).
+Choose an unused address in your own management subnet, outside your DHCP pool.
 Use a separate `<node>-init.cfg` with a distinct IP for each Panorama.
 Init applies the file and commits; it does not read `PANORAMA_*` network settings
 from `.env` or override the file's hostname, management services, or networking.
@@ -874,12 +936,12 @@ both logins separately in the local, gitignored `.env`:
 
 ```dotenv
 EVE_USERNAME=admin
-EVE_PASSWORD=eve
+EVE_PASSWORD=your-api-password
 EVE_SSH_USERNAME=root
-EVE_SSH_PASSWORD=eve
+EVE_SSH_PASSWORD=your-ssh-password
 ```
 
-These are the current server's credentials. After changing its SSH password,
+Replace these example values with your own credentials. After changing the SSH password,
 update `EVE_SSH_PASSWORD` in `.env`; the next DHCP command uses the new value.
 Shell environment variables override `.env`. Enter values without surrounding
 quotes. `config/servers.yaml` maps `ssh_username_env` and `ssh_password_env` to
@@ -890,7 +952,7 @@ requires EVE host SSH credentials.
 SSH password authentication is automatic, without an interactive prompt or SSH
 agent/key authentication. Passwords are not passed as command-line arguments.
 The host key must already be trusted in `~/.ssh/known_hosts`; for a new server,
-connect with `ssh root@10.0.4.4` and verify its fingerprint before accepting it.
+connect with `ssh root@'<eve-host>'` and verify its fingerprint before accepting it.
 The DHCP helper requires root access.
 
 Use `--server <name>`
@@ -899,25 +961,26 @@ supported; unexpected service/configuration layouts are rejected.
 
 ### Replace the saved SSH key after rebuilding the EVE VM
 
-When you rebuild or replace the EVE VM at `10.0.4.4`, its SSH host key may change.
-After confirming the replacement was intentional, run these commands on your Mac:
+When you rebuild or replace your EVE VM, its SSH host key may change.
+After confirming the replacement was intentional, run these commands on your
+workstation, replacing `<eve-host>` with the configured SSH IP or hostname:
 
 ```sh
-ssh-keygen -R 10.0.4.4
-ssh -o StrictHostKeyChecking=accept-new root@10.0.4.4
+ssh-keygen -R '<eve-host>'
+ssh root@'<eve-host>'
 ```
 
-The first command removes the old saved key. The second automatically trusts the
-new key and prompts for the EVE host's SSH password. Exit the SSH session, then
+The first command removes the old saved key. The second prompts you to trust the
+new key; verify its fingerprint before accepting it, then enter the EVE host's SSH
+password. Exit the SSH session, then
 retry your command, for example:
 
 ```sh
 eve init palo-lab --node c8kv-0
 ```
 
-Repeat these steps after future intentional VM replacements. `accept-new` still
-rejects changed keys when an existing entry is present; it does not disable host
-key checking. Update `.env` if the rebuilt VM also has a different SSH password.
+Repeat these steps after future intentional VM replacements. Update
+`config/servers.yaml` if the address changes, and `.env` if credentials change.
 
 ### Deployment errors
 
@@ -968,7 +1031,7 @@ eve --root /path/to/eve-ng plan palo-lab
 ```
 
 `--server <name>` follows the subcommand and selects an entry in
-`config/servers.yaml`; it defaults to `default` (`http://10.0.4.4`). `--root <path>`
+`config/servers.yaml`; it defaults to the entry named `default`, using the URL you configured. `--root <path>`
 goes before the subcommand and defaults to the current working directory. Activate
 the project's virtual environment before using `eve`, or invoke `.venv/bin/eve`
 from the repository root.
