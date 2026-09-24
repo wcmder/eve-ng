@@ -157,5 +157,73 @@ class DhcpTests(unittest.TestCase):
             with self.assertRaises(ValueError): invoke({}, 'pnet1', self.root)
         remote.assert_not_called()
 
+class InteractiveDhcpTests(unittest.TestCase):
+    setUp = DhcpTests.setUp
+
+    def test_edit_multiple_settings_preserves_comments_and_leases(self):
+        from eve_lab.dhcp_remote import settings_snapshot, update_settings
+        with self.config.open('a') as stream:
+            stream.write('# clients\ndhcp-range=172.16.1.100,172.16.1.199,12h\n'
+                         'dhcp-option=3,172.16.1.1\ndhcp-option=6,8.8.8.8\nlog-dhcp\n')
+        original = self.config.read_text()
+        leases = self.leases.read_text()
+        snapshot = settings_snapshot(self.config, self.leases)
+        changes = {str(item['line']): value for item, value in zip(snapshot['settings'][2:], [
+            '172.16.1.110,172.16.1.180,24h', '3,172.16.1.254', '6,1.1.1.1', None])}
+        payload = {'original': original, 'changes': changes}
+        preview = update_settings(payload, True, self.config, self.leases)
+        self.assertTrue(preview['would_change'])
+        self.assertEqual(self.config.read_text(), original)
+        with patch('eve_lab.dhcp_remote.os.chown'):
+            result = update_settings(payload, False, self.config, self.leases)
+        self.assertEqual(Path(result['backup']).read_text(), original)
+        self.assertEqual(self.leases.read_text(), leases)
+        self.assertIn('# clients\n', self.config.read_text())
+        self.assertIn('dhcp-option=6,1.1.1.1', self.config.read_text())
+        self.assertNotIn('log-dhcp', self.config.read_text())
+
+    def test_stale_fixed_and_multiline_edits_rejected(self):
+        from eve_lab.dhcp_remote import update_settings
+        with self.config.open('a') as stream:
+            stream.write('domain=lab.example\n')
+        original = self.config.read_text()
+        for payload in (
+            {'original': 'stale', 'changes': {}},
+            {'original': original, 'changes': {'0': 'pnet2'}},
+            {'original': original, 'changes': {'2': 'foo\ndhcp-script=/tmp/script'}},
+        ):
+            with self.assertRaises((ValueError, RuntimeError)):
+                update_settings(payload, False, self.config, self.leases)
+        self.assertEqual(self.config.read_text(), original)
+
+    @patch('eve_lab.dhcp.run_remote')
+    def test_enter_keeps_all_and_eof_cancels_without_writes(self, remote):
+        from eve_lab.dhcp import update
+        remote.return_value = {'original': 'domain=example\n', 'settings': [
+            {'key': 'domain', 'line': 0, 'value': 'example', 'editable': True}]}
+        with patch('builtins.input', return_value=''):
+            self.assertFalse(update({}, 'pnet1')['changed'])
+        self.assertEqual(remote.call_count, 1)
+        remote.reset_mock()
+        with patch('builtins.input', side_effect=EOFError):
+            with self.assertRaisesRegex(RuntimeError, 'cancelled'):
+                update({}, 'pnet1')
+        self.assertEqual(remote.call_count, 1)
+
+    @patch('eve_lab.dhcp.run_remote')
+    def test_prompt_sends_edits_and_dry_run(self, remote):
+        import json
+        import shlex
+        from eve_lab.dhcp import update
+        remote.side_effect = [{'original': 'domain=example\n', 'settings': [
+            {'key': 'domain', 'line': 0, 'value': 'example', 'editable': True}]}, {'dry_run': True}]
+        with patch('builtins.input', return_value='lab.example'):
+            update({}, 'pnet1', True)
+        arguments = shlex.split(remote.call_args.args[1])
+        self.assertEqual(arguments[-1], '--dry-run')
+        payload = json.loads(arguments[arguments.index('--update-settings') + 1])
+        self.assertEqual(payload['changes'], {'0': 'lab.example'})
+
+
 if __name__ == '__main__':
     unittest.main()

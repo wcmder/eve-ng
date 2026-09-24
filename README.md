@@ -99,6 +99,7 @@ Use your actual lab and node names:
 | `eve nat status pnet1` | Show current NAT rules and managed pnet1 configuration state. | SSH |
 | `eve nat add pnet1 [--dry-run]` | Add runtime Internet NAT through pnet0. | SSH |
 | `eve nat remove pnet1 [--dry-run]` | Remove only the NAT rules managed by this command. | SSH |
+| `eve dhcp update pnet1 [--dry-run]` | Prompt for each current DHCP setting; Enter keeps its value. | SSH |
 | `eve dhcp update dns [pnet1] [--dry-run]` | Update DHCP DNS servers from `.env`. | SSH |
 | `eve dhcp report pnet1` | List DHCP leases, addresses, hostnames, and expiration times. | SSH |
 | `eve dhcp clear pnet1 [--dry-run]` | Back up and clear pnet1 DHCP server leases over SSH. | SSH |
@@ -746,6 +747,49 @@ changes are **not persisted across host reboots**; rerun add after reboot.
 Remove stops NAT for new connections; existing tracked NAT connections may retain
 their mappings until they expire. No connection tracking entries are flushed.
 Failures report completed commands without automatic rollback.
+
+### Update all current pnet1 DHCP settings interactively
+
+```sh
+eve dhcp update pnet1
+eve dhcp update pnet1 --dry-run
+eve dhcp update pnet1 --server default
+```
+
+The command reads `/etc/eve-dhcp/pnet1.conf` over SSH and prompts for each current
+setting. Press Enter to keep the displayed value, type a replacement, or type `-`
+to remove that setting. Ctrl-C or end-of-input cancels before any changes are sent.
+Repeated directives are prompted separately, with line numbers. Bare flags display
+`enabled`; Enter keeps them and `-` disables them. Comments and unchanged lines are
+preserved. The interface and lease-file path are displayed but fixed for the
+dedicated pnet1 service.
+
+Values use dnsmasq configuration syntax. For example, prompts may look like:
+
+```text
+dhcp-range (line 5) [172.16.1.100,172.16.1.199,255.255.255.0,12h]:
+dhcp-option (line 6) [option:router,172.16.1.1]:
+dhcp-option (line 7) [option:dns-server,8.8.8.8,1.1.1.1]:
+```
+
+For a range, enter the complete comma-separated value to change its start/end
+addresses, netmask, or lease duration. For DHCP options, retain the option number
+or name before the replacement value. Every existing directive is shown; this
+command does not add absent directives. The DNS-only command below can add a DNS
+option if one is missing.
+
+After the last prompt, changes are applied automatically. `--dry-run` shows the
+proposed configuration without writing or restarting. Keeping every value unchanged
+also avoids writes and restarts. Updates check that the configuration has not
+changed since it was read, test the proposed file with `dnsmasq --test`, save a
+timestamped backup, and restart `eve-pnet1-dhcp.service`. A failed restart triggers
+restoration of the previous configuration and a recovery restart.
+
+The host must be online to read current settings, including for `--dry-run`.
+This command uses the same root SSH credentials and dedicated-service checks as
+the other DHCP helpers. It does not change the host bridge's IP, guest static
+addresses, or clear leases. Clients receive new settings on DHCP renewal; ensure
+the advertised subnet and gateway match your pnet1 network.
 
 ### Update pnet1 DHCP DNS
 

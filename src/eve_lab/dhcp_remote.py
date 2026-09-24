@@ -125,6 +125,10 @@ def update_dns(servers, dry_run=False, config_path='/etc/eve-dhcp/pnet1.conf',
               'would_change': updated != original, 'backup': None}
     if dry_run or updated == original:
         return result
+    return save_settings(config, original, updated, result)
+
+
+def save_settings(config, original, updated, result):
     fd, temporary = tempfile.mkstemp(prefix='.pnet1-dns-', dir=config.parent)
     backup = config.with_name(config.name + '.backup-' + str(time.time_ns()))
     try:
@@ -149,19 +153,81 @@ def update_dns(servers, dry_run=False, config_path='/etc/eve-dhcp/pnet1.conf',
                 if run('systemctl', 'is-active', 'eve-pnet1-dhcp.service') != 'active':
                     raise RuntimeError('DHCP service is inactive')
             except (RuntimeError, OSError, subprocess.SubprocessError):
-                raise RuntimeError(f'DNS update failed and DHCP recovery failed; inspect service; backup: {backup}') from None
-            raise RuntimeError(f'DNS update failed; previous configuration restored; backup: {backup}') from error
+                raise RuntimeError(f'DHCP update failed and DHCP recovery failed; inspect service; backup: {backup}') from None
+            raise RuntimeError(f'DHCP update failed; previous configuration restored; backup: {backup}') from error
         result.update(changed=True, backup=str(backup), service='active',
-                      message='DNS updated; clients receive new settings on DHCP renewal. Leases were not cleared.')
+                      message='DHCP settings updated; clients receive new settings on renewal. Leases were not cleared.')
         return result
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
 
 
+# These identify the dedicated service, rather than client DHCP settings.
+FIXED_SETTINGS = {'interface', 'dhcp-leasefile'}
+
+
+def settings_snapshot(config_path='/etc/eve-dhcp/pnet1.conf',
+                      lease_path='/var/lib/eve-dhcp/pnet1.leases'):
+    clear_leases(config_path=config_path, lease_path=lease_path, report=True)
+    config = Path(config_path)
+    if config.is_symlink() or not config.is_file():
+        raise RuntimeError('Expected a regular DHCP configuration file')
+    original = config.read_text()
+    settings = []
+    for index, line in enumerate(original.splitlines()):
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        key, separator, value = stripped.partition('=')
+        key = key.strip()
+        settings.append({'line': index, 'key': key,
+                         'value': value.strip() if separator else None,
+                         'editable': key not in FIXED_SETTINGS})
+    return {'interface': 'pnet1', 'original': original, 'settings': settings}
+
+
+def update_settings(payload, dry_run=False, config_path='/etc/eve-dhcp/pnet1.conf',
+                    lease_path='/var/lib/eve-dhcp/pnet1.leases'):
+    snapshot = settings_snapshot(config_path, lease_path)
+    original = snapshot['original']
+    if payload['original'] != original:
+        raise RuntimeError('DHCP configuration changed while prompting; rerun the command')
+    lines = original.splitlines(keepends=True)
+    editable = {str(item['line']): item for item in snapshot['settings'] if item['editable']}
+    for index, value in payload['changes'].items():
+        if index not in editable:
+            raise ValueError('Cannot change the dedicated interface or lease file')
+        item = editable[index]
+        if value is None:
+            lines[int(index)] = ''
+        else:
+            if not isinstance(value, str) or any(c in value for c in ('\n', '\r', '\x00')):
+                raise ValueError('DHCP settings must be single-line values')
+            if item['value'] is None:
+                if value != 'enabled':
+                    raise ValueError('Flag settings must be enabled or removed')
+                replacement = item['key']
+            else:
+                replacement = item['key'] + '=' + value
+            lines[int(index)] = replacement + '\n'
+    updated = ''.join(lines)
+    result = {'action': 'update', 'interface': 'pnet1', 'dry_run': dry_run,
+              'changed': False, 'would_change': updated != original, 'backup': None,
+              'configuration': updated}
+    if dry_run or updated == original:
+        return result
+    return save_settings(Path(config_path), original, updated, result)
+
+
 if __name__ == "__main__":
     try:
-        if '--update-dns' in sys.argv:
+        if '--settings' in sys.argv:
+            result = settings_snapshot()
+        elif '--update-settings' in sys.argv:
+            payload = json.loads(sys.argv[sys.argv.index('--update-settings') + 1])
+            result = update_settings(payload, dry_run='--dry-run' in sys.argv)
+        elif '--update-dns' in sys.argv:
             servers = sys.argv[sys.argv.index('--update-dns') + 1].split(',')
             result = update_dns(servers, dry_run='--dry-run' in sys.argv)
         else:

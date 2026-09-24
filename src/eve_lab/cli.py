@@ -18,7 +18,7 @@ from .config import load_server
 from .nat import configure as configure_nat
 from .securecrt import generate as generate_securecrt
 from .session_discovery import discover as discover_sessions
-from .dhcp import clear as clear_dhcp, report as report_dhcp, update_dns as update_dhcp_dns
+from .dhcp import clear as clear_dhcp, report as report_dhcp, update_dns as update_dhcp_dns, update as update_dhcp
 from .deploy import apply, delete, lab_status, lifecycle, plan
 from .topology import load_lab_target, load_topology
 
@@ -47,6 +47,10 @@ def main():
     dns.add_argument('interface', nargs='?', default='pnet1', choices=['pnet1'])
     dns.add_argument('--server', default='default')
     dns.add_argument('--dry-run', action='store_true', help='Preview DNS changes without modifying DHCP')
+    settings = update_commands.add_parser('pnet1', help='Prompt for each current pnet1 DHCP setting')
+    settings.set_defaults(interface='pnet1')
+    settings.add_argument('--server', default='default')
+    settings.add_argument('--dry-run', action='store_true', help='Prompt and preview without changing DHCP')
     securecrt = commands.add_parser("securecrt", help="Generate SSH sessions from lab consoles, or pnet1 DHCP leases")
     securecrt.add_argument("interface", metavar="LAB_OR_PNET1", help="Lab name for automatic console discovery, or pnet1 for DHCP/.env discovery")
     securecrt.add_argument("--timeout", type=int, default=60, help="Console login prompt timeout in seconds")
@@ -138,7 +142,9 @@ def main():
             return
         if args.command == "dhcp":
             if args.dhcp_action == 'update':
-                result = update_dhcp_dns(server, args.interface, args.root, args.dry_run)
+                result = (update_dhcp(server, args.interface, args.dry_run)
+                          if args.dhcp_update == 'pnet1'
+                          else update_dhcp_dns(server, args.interface, args.root, args.dry_run))
             else:
                 result = (report_dhcp(server, args.interface) if args.dhcp_action == "report"
                           else clear_dhcp(server, args.interface, args.dry_run))
