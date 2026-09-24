@@ -4,6 +4,15 @@ remote_folder: /
 
 nodes:
 
+  - name: rt-x
+    template: c8000v
+    type: qemu
+    console: telnet
+    image: c8000v-17.15.06
+    cpu: 2
+    ethernet: 4
+    ram: 8192
+
   - name: rt-0
     template: c8000v
     type: qemu
@@ -85,6 +94,10 @@ links:
 
   - node: rt-0
     interface: GigabitEthernet8
+    network: mgmt
+
+  - node: rt-x
+    interface: GigabitEthernet4
     network: mgmt
 
   - node: rt-a
