@@ -1,6 +1,7 @@
 """Versa 22.1.x serial initialization through the EVE host."""
 import json
 import re
+import shlex
 import sys
 
 from .device_console import Console, credentials, environment_values
@@ -46,6 +47,7 @@ class VersaConsole(Console):
     """VOS uses CLI users; headends change the existing shell account with passwd."""
 
     headend = False
+    sudo_password = False
 
     def _prompt(self, prompt, username=None):
         prompt = prompt.strip()
@@ -88,11 +90,11 @@ class VersaConsole(Console):
             if re.fullmatch(WIZARD, prompt):
                 if self.headend and re.fullmatch(OPTIONAL_SETUP, prompt):
                     if declined_setup:
-                        raise RuntimeError('Versa repeated the optional setup prompt after answering no; inspect the console')
+                        raise RuntimeError('Versa repeated the optional setup prompt after answering N; inspect the console')
                     declined_setup = True
                     print('Declining optional Versa setup; continuing to the shell...',
                           file=sys.stderr, flush=True)
-                    self.send('no')
+                    self.send('N')
                     continue
                 raise RuntimeError('Complete the Versa first-boot setup wizard in the console before running init')
             if re.fullmatch(SHELL, prompt) or re.fullmatch(CLI, prompt):
@@ -145,11 +147,12 @@ class VersaConsole(Console):
         if self.mode != 'shell':
             raise RuntimeError('Director/Analytics password changes require a shell login; exit CLI and retry')
         # No password in a shell command, process argument, or temporary file.
-        self.send('passwd')
+        self.send('sudo passwd ' + shlex.quote(self.username) if self.sudo_password else 'passwd')
+        sudo_prompt = r'(?i:^\[sudo\] password for ' + re.escape(self.username) + r':\s*$)'
         seen = set()
         transcript = ''
         for _ in range(6):
-            output, match = self.expect('|'.join((PASSWORD, FAILURE, SHELL)),
+            output, match = self.expect('|'.join((sudo_prompt, PASSWORD, FAILURE, SHELL)),
                                         timeout=self.boot_timeout)
             transcript += output
             prompt = match.group().strip()
@@ -164,7 +167,9 @@ class VersaConsole(Console):
                 self.current_password = password
                 self._prompt(prompt, self.username)
                 return
-            if 'retype' in lower or 'confirm' in lower:
+            if re.fullmatch(sudo_prompt, prompt):
+                stage, value = 'sudo', self.current_password
+            elif 'retype' in lower or 'confirm' in lower:
                 stage, value = 'confirm', password
             elif lower.startswith(('new', 'enter new')):
                 stage, value = 'new', password

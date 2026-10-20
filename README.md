@@ -419,7 +419,9 @@ current password when devices have different credentials.
   sets only the selected existing system account's password,
   then commits and requires confirmation of completion.
 - **Director and Analytics:** changes the existing shell account password using
-  interactive `passwd` when the current and desired passwords differ. If the
+  interactive `sudo passwd <username>` on Director and `passwd` on Analytics
+  when the current and desired passwords differ. Director sudo prompts use the
+  current shell password. If the
   init file has commands, enters the component's CLI and applies and commits them.
   GUI/provider, database, and service passwords are separate and are not changed.
 
@@ -432,7 +434,7 @@ helper manages CLI mode and commit. Passwords belong in `.env`, not these files.
 No IP addresses, DHCP client settings, routing, Controller role, staging profiles,
 Director provisioning, or Analytics cluster settings are supplied by the starters.
 
-On Director/Analytics, init answers `no` once to the optional
+On Director/Analytics, init answers uppercase `N` once to the optional
 `Do you want to enter setup?` prompt and continues to the shell. Other setup
 questions stop initialization for manual completion; network setup is not performed
 by declining this prompt. Ordinary Linux

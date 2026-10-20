@@ -77,7 +77,7 @@ class VersaConsoleTests(unittest.TestCase):
                                        headend=True)
                 console.login('Administrator', 'new', 'old')
                 self.assertEqual([c.args[0] for c in console.send.call_args_list],
-                                 ['', 'Administrator', 'old', 'no'])
+                                 ['', 'Administrator', 'old', 'N'])
                 self.assertEqual(console.mode, 'shell')
 
     def test_optional_setup_is_bounded_and_other_wizards_stop(self):
@@ -88,7 +88,7 @@ class VersaConsoleTests(unittest.TestCase):
             console = self.console(prompts, headend=True)
             with self.assertRaises(RuntimeError):
                 console.login('Administrator', 'new', 'old')
-            self.assertLessEqual([c.args[0] for c in console.send.call_args_list].count('no'), 1)
+            self.assertLessEqual([c.args[0] for c in console.send.call_args_list].count('N'), 1)
 
     def test_headend_passwd_never_sent_as_shell_command(self):
         console = self.console([
@@ -125,6 +125,32 @@ class VersaConsoleTests(unittest.TestCase):
         console = self.console(['login:', 'Password:', 'New password:', 'BAD PASSWORD: too short'])
         with self.assertRaisesRegex(RuntimeError, 'first-login password change'):
             console.login('admin', 'desired', 'existing')
+
+    def test_director_sudo_password_change_with_and_without_prompt(self):
+        for sudo_prompts in ([], ['[sudo] password for Administrator:']):
+            console = self.console(['Administrator@director:~$'] + sudo_prompts + [
+                'New password:', 'Retype new password:',
+                'passwd: password updated successfully\nAdministrator@director:~$'], headend=True)
+            console.sudo_password = True
+            console.login('Administrator', 'desired', 'current')
+            console.initialize([], 'Administrator', 'desired')
+            expected = ['', 'sudo passwd Administrator']
+            if sudo_prompts:
+                expected.append('current')
+            self.assertEqual([c.args[0] for c in console.send.call_args_list],
+                             expected + ['desired', 'desired'])
+            self.assertTrue(console.password_changed)
+
+    def test_director_does_not_retry_rejected_sudo_password(self):
+        console = self.console(['Administrator@director:~$',
+                                '[sudo] password for Administrator:',
+                                'Sorry, try again.\n[sudo] password for Administrator:'], headend=True)
+        console.sudo_password = True
+        console.login('Administrator', 'desired', 'current')
+        with self.assertRaisesRegex(RuntimeError, 'repeated'):
+            console.initialize([], 'Administrator', 'desired')
+        self.assertEqual([c.args[0] for c in console.send.call_args_list],
+                         ['', 'sudo passwd Administrator', 'current'])
 
     def test_headend_unchanged_password_skips_passwd_but_runs_cfg(self):
         console = self.console([
@@ -247,6 +273,8 @@ class VersaInitTests(unittest.TestCase):
                 self.node(template)
                 result = initialize(self.client, {'name': 'test'}, self.root, 'default')
                 self.assertEqual(result['completed'], ['node'])
+                if template == 'versadir':
+                    self.assertTrue(factory.return_value.sudo_password)
                 factory.return_value.login.assert_called_with('admin', 'desired', 'current')
                 factory.return_value.initialize.assert_called_with([], username='admin', password='desired')
         headend.return_value.initialize.side_effect = RuntimeError('Versa commit was not confirmed')

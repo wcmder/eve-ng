@@ -267,6 +267,8 @@ def initialize(client, topology, root, server_name, node_name=None, check=False,
                                 'versadir': VersaHeadendConsole,
                                 'versaana': VersaHeadendConsole}.get(template, Console)
                 console = console_type(channel, boot_timeout=timeout)
+                if template == 'versadir':
+                    console.sudo_password = True
                 if template == 'panorama' or (template == 'paloalto' and not targets.get(name)):
                     console.login(*login, auto_factory=not bool(targets.get(name)))
                 else:
