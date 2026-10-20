@@ -12,6 +12,8 @@ from .config import load_server
 from .deploy import lab_path, named
 from .device_console import Console, credentials
 from .palo_ssh import management_targets, connect_palo
+from .versa_console import (VERSA_PREFIXES, VersaConsole, VersaHeadendConsole,
+                            versa_credentials, validate_commands as validate_versa_commands)
 
 
 class PaloConsole(Console):
@@ -175,9 +177,11 @@ def config_commands(path, template):
         raise ValueError('Control characters in init file')
     commands = [line.strip() for line in content.splitlines()
                 if line.strip() and not line.lstrip().startswith(('!', '#'))]
-    if not commands and template != 'panorama':
+    if not commands and template != 'panorama' and template not in VERSA_PREFIXES:
         raise ValueError('Init file is empty')
-    if template in ('paloalto', 'panorama'):
+    if template in VERSA_PREFIXES:
+        validate_versa_commands(commands)
+    elif template in ('paloalto', 'panorama'):
         if any(not line.startswith(('set ', 'delete ')) for line in commands):
             raise ValueError('Palo Alto init files must contain only configuration-mode set/delete commands')
     elif any(line.lower().startswith(('banner ', 'macro ', 'reload', 'write ', 'copy ', 'configure ')) for line in commands):
@@ -204,7 +208,7 @@ def initialize(client, topology, root, server_name, node_name=None, check=False,
         template = node.get('template')
         address = targets.get(name) if template in ('paloalto', 'panorama') else None
         reason = None
-        if template not in ('c8000v', 'paloalto', 'panorama'):
+        if template not in ('c8000v', 'paloalto', 'panorama') and template not in VERSA_PREFIXES:
             reason = 'Unsupported init template: ' + str(template)
         elif node.get('console') != 'telnet' and not address:
             reason = 'Console type ' + str(node.get('console')) + ' is unsupported; init requires a working Telnet serial console'
@@ -235,7 +239,8 @@ def initialize(client, topology, root, server_name, node_name=None, check=False,
         return result
     server = load_server(root, server_name, auth='ssh')
     # Validate all credentials before touching devices.
-    logins = {template: credentials(root, prefix='PALO' if template in ('paloalto', 'panorama') else 'CISCO')
+    logins = {template: (versa_credentials(root, template) if template in VERSA_PREFIXES else
+                        credentials(root, prefix='PALO' if template in ('paloalto', 'panorama') else 'CISCO'))
               for _, template, _, _ in pending}
     ssh = paramiko.SSHClient()
     try:
@@ -257,7 +262,10 @@ def initialize(client, topology, root, server_name, node_name=None, check=False,
                     channel.get_pty(term='vt100', width=512, height=1000)
                     channel.exec_command('telnet 127.0.0.1 ' + str(port))
                 console_type = {'paloalto': PaloConsole if targets.get(name) else PaloSerialConsole,
-                                'panorama': PanoramaConsole}.get(template, Console)
+                                'panorama': PanoramaConsole,
+                                'versafvnf': VersaConsole, 'versavnf': VersaConsole,
+                                'versadir': VersaHeadendConsole,
+                                'versaana': VersaHeadendConsole}.get(template, Console)
                 console = console_type(channel, boot_timeout=timeout)
                 if template == 'panorama' or (template == 'paloalto' and not targets.get(name)):
                     console.login(*login, auto_factory=not bool(targets.get(name)))

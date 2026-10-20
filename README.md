@@ -368,6 +368,93 @@ finished booting; if PAN-OS rejects a command or commit, inspect the reported
 failure and retry after it is ready. Cisco and Panorama serial init have been
 tested live; the Palo firewall serial first-boot test is pending.
 
+### Initialize Versa routers, Controller, Director, and Analytics
+
+```sh
+eve init versa-lab1 --check
+eve init versa-lab1 --node versa-rt-a
+eve init versa-lab1 --node versa-controller
+eve init versa-lab1 --node versa-director
+eve init versa-lab1 --node versa-analytics
+eve init versa-lab1 --timeout 900
+```
+
+Versa init supports `versafvnf` (also `versavnf`), `versadir`, and `versaana`
+through running Telnet serial consoles discovered from the EVE API. It connects
+through EVE host SSH, so guest management IP connectivity is not required.
+The implementation targets the lab's 22.1.4 images. It has offline simulated-console
+test coverage; live Versa initialization has not yet been verified.
+
+Copy the Versa entries from `.env.example` into your existing local `.env` and
+fill in the values. Do not overwrite your existing credentials file:
+
+```dotenv
+# Existing VOS system account, shared by the routers and Controller:
+VERSA_USERNAME=admin
+VERSA_PASSWORD=your-desired-password
+VERSA_CURRENT_PASSWORD=the-current-password
+
+# Existing Director shell account; adjust the username for your image:
+VERSA_DIRECTOR_USERNAME=Administrator
+VERSA_DIRECTOR_PASSWORD=your-desired-password
+VERSA_DIRECTOR_CURRENT_PASSWORD=the-current-password
+
+# Existing Analytics shell account; adjust the username for your image:
+VERSA_ANALYTICS_USERNAME=versa
+VERSA_ANALYTICS_PASSWORD=your-desired-password
+VERSA_ANALYTICS_CURRENT_PASSWORD=the-current-password
+```
+
+`*_PASSWORD` is the desired password. `*_CURRENT_PASSWORD` is optional: when
+blank or absent, login uses the desired password. Set it to the current/factory
+password for the first run, then remove it or leave it blank after the password
+has changed. The command makes one login attempt with the selected credentials;
+it does not guess factory passwords. Shell environment variables override `.env`.
+Keep `*_USERNAME` set to the existing default account on your image. Init changes
+that account's password without renaming it or changing its role or login shell.
+All VOS targets in one run share `VERSA_*`; use `--node` and the appropriate
+current password when devices have different credentials.
+
+- **Routers and Controller:** enters the VOS CLI, applies the init commands,
+  sets only the selected existing system account's password,
+  then commits and requires confirmation of completion.
+- **Director and Analytics:** changes the existing shell account password using
+  interactive `passwd` when the current and desired passwords differ. If the
+  init file has commands, enters the component's CLI and applies and commits them.
+  GUI/provider, database, and service passwords are separate and are not changed.
+
+The six files in `labs/versa-lab1/configs/versa-*-init.cfg` are comment-only
+starters, so initially they perform credential setup only. Add one component-specific
+CLI configuration-mode `set` or `delete` command per line. Blank lines and lines
+beginning with `#` or `!` are ignored. Do not include `cli`, `configure`, `commit`,
+`exit`, shell commands, interactive commands, or multiline configurations; the
+helper manages CLI mode and commit. Passwords belong in `.env`, not these files.
+No IP addresses, DHCP client settings, routing, Controller role, staging profiles,
+Director provisioning, or Analytics cluster settings are supplied by the starters.
+
+On Director/Analytics, init answers `no` once to the optional
+`Do you want to enter setup?` prompt and continues to the shell. Other setup
+questions stop initialization for manual completion; network setup is not performed
+by declining this prompt. Ordinary Linux
+mandatory password-change prompts are supported. For Director/Analytics password
+rotation, start from a shell login. Close other console sessions and exit any
+configuration mode before running init. Avoid unrelated pending candidate changes:
+commit applies the candidate configuration. A failed command/commit stops that node
+and is reported; earlier changes are not rolled back. A shell or first-login password
+change can succeed before a later configuration error, so check the current password
+and remove a stale `*_CURRENT_PASSWORD` before retrying. The Controller-behind-hub
+and headend networking design still needs to be configured separately.
+
+`--check` previews API console targets and parses init files without device login
+or password changes; it requires an online EVE API. It does not verify guest CLI
+syntax, credentials, password policy, or boot readiness. Versa support here is
+limited to init; backup, restore, and SecureCRT console discovery retain their
+existing supported templates.
+
+References: [Versa CLI access](https://docs.versa-networks.com/Secure_SD-WAN/01_Configuration_from_Director/Common_Configuration/Access_the_Versa_CLI),
+[VOS system users](https://docs.versa-networks.com/Getting_Started/Deployment_and_Initial_Configuration/Branch_Deployment/Initial_Configuration/Configure_Basic_Features),
+and [headend initial configuration](https://docs.versa-networks.com/Getting_Started/Deployment_and_Initial_Configuration/Headend_Deployment/Initial_Configuration/Perform_Initial_Software_Configuration).
+
 ### Palo Alto initialization over management SSH
 
 For factory-new VMs, use the serial-console or supported bootstrap ISO workflow

@@ -1,0 +1,162 @@
+name: versa-lab1
+description: Versa SD-WAN lab with three routers, Controller, Analytics, and Director
+remote_folder: /
+
+nodes:
+  # Replace each image with its installed directory basename from
+  # /opt/unetlab/addons/qemu/. Confirm template names with `eve templates`.
+
+  - name: cisco-internet
+    template: c8000v
+    type: qemu
+    console: telnet
+    image: c8000v-17.15.06
+    cpu: 2
+    ethernet: 6
+    ram: 8192
+
+  - name: versa-rt-a
+    template: versafvnf
+    type: qemu
+    cpu: 4
+    ram: 8192
+    image: versafvnf-22.1.4
+    console: telnet
+    ethernet: 6
+    left: 200
+    top: 400
+
+  - name: versa-rt-b
+    template: versafvnf
+    type: qemu
+    cpu: 4
+    ram: 8192
+    image: versafvnf-22.1.4
+    console: telnet
+    ethernet: 6
+    left: 450
+    top: 400
+
+  - name: versa-rt-c
+    template: versafvnf
+    type: qemu
+    cpu: 4
+    ram: 8192
+    image: versafvnf-22.1.4
+    console: telnet
+    ethernet: 6
+    left: 700
+    top: 400
+
+  # Controller uses the FlexVNF/VOS image; its role is configured in the guest.
+  - name: versa-controller
+    template: versafvnf
+    type: qemu
+    cpu: 8
+    ram: 16384
+    image: versafvnf-22.1.4
+    console: telnet
+    ethernet: 6
+    left: 200
+    top: 150
+
+  - name: versa-analytics
+    template: versaana
+    type: qemu
+    cpu: 8
+    ram: 16384
+    image: versaana-22.1.4
+    console: telnet
+    ethernet: 3
+    left: 450
+    top: 150
+
+  - name: versa-director
+    template: versadir
+    type: qemu
+    cpu: 8
+    ram: 16384
+    image: versadir-22.1.4
+    console: telnet
+    ethernet: 2
+    left: 700
+    top: 150
+
+networks:
+
+  - name: mgmt
+    type: pnet1
+
+  - name: headend-switch
+    type: bridge
+    left: 700
+    top: 275
+
+links:
+  - node: cisco-internet
+    interface: GigabitEthernet6
+    network: mgmt
+
+  - node: versa-rt-a
+    interface: eth-0/0
+    network: mgmt
+
+  - node: versa-rt-b
+    interface: eth-0/0
+    network: mgmt
+
+  - node: versa-rt-c
+    interface: eth-0/0
+    network: mgmt
+
+  - node: versa-controller
+    interface: eth-0/0
+    network: mgmt
+
+  - node: versa-analytics
+    interface: eth0
+    network: mgmt
+
+  - node: versa-director
+    interface: eth0
+    network: mgmt
+
+  - node: versa-rt-c
+    interface: vni-0/1
+    network: headend-switch
+
+  - node: versa-controller
+    interface: vni-0/0
+    network: headend-switch
+
+  - node: versa-director
+    interface: eth1
+    network: headend-switch
+
+  - node: versa-analytics
+    interface: eth1
+    network: headend-switch
+
+  - name: internet-versa-a
+    from:
+      node: cisco-internet
+      interface: GigabitEthernet1
+    to:
+      node: versa-rt-a
+      interface: vni-0/0
+
+  - name: internet-versa-b
+    from:
+      node: cisco-internet
+      interface: GigabitEthernet2
+    to:
+      node: versa-rt-b
+      interface: vni-0/0
+
+  - name: internet-versa-c
+    from:
+      node: cisco-internet
+      interface: GigabitEthernet3
+    to:
+      node: versa-rt-c
+      interface: vni-0/0
