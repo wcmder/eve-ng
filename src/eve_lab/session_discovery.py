@@ -9,6 +9,7 @@ from .deploy import named, lab_path, interfaces
 from .device_console import Console, credentials
 from .initialize import PaloConsole
 from .topology import interface_key
+from .versa_console import VERSA_PREFIXES, SHELL, CLI, LOGIN, PASSWORD, FAILURE, WIZARD
 
 
 class DiscoveryError(RuntimeError):
@@ -48,6 +49,61 @@ def login(console, template, auth):
     raise DiscoveryError('Console login did not complete')
 
 
+def versa_login(console, auth):
+    """Read-only login: never perform first-boot setup or change passwords."""
+    console.send('')
+    seen = set()
+    for _ in range(8):
+        _, match = console.expect('|'.join((LOGIN, PASSWORD, FAILURE, WIZARD, SHELL, CLI)),
+                                  timeout=console.boot_timeout)
+        prompt = match.group().strip()
+        if re.fullmatch(SHELL, prompt):
+            if not prompt.startswith((auth[0] + '@', '[' + auth[0] + '@')):
+                raise DiscoveryError('Console belongs to another user; log out before discovery')
+            console.prompt = prompt
+            return
+        if re.fullmatch(CLI, prompt):
+            if not prompt.endswith('>'):
+                raise DiscoveryError('Console is in configuration mode; exit it before discovery')
+            if 'exit' in seen:
+                raise DiscoveryError('Exit Versa CLI to the Linux shell before discovery')
+            seen.add('exit')
+            console.send('exit')
+            continue
+        if not re.fullmatch(LOGIN, prompt):
+            raise DiscoveryError('Device needs initialization or rejected configured credentials')
+        stage = 'username' if prompt.lower().endswith(('login:', 'username:')) else 'password'
+        if stage in seen:
+            raise DiscoveryError('Console authentication failed; not retrying credentials')
+        seen.add(stage)
+        console.send(auth[0] if stage == 'username' else auth[1])
+    raise DiscoveryError('Console login did not complete')
+
+
+def versa_shell_command(console, command):
+    console.send(command)
+    output, match = console.expect(SHELL, timeout=console.boot_timeout)
+    lines = output[:match.start()].splitlines()
+    if lines and lines[0].strip() == command:
+        lines.pop(0)
+    return '\n'.join(lines).strip()
+
+
+def versa_identity(console):
+    hostname = versa_shell_command(console, 'hostname')
+    if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', hostname):
+        raise DiscoveryError('Could not read Versa hostname from Linux shell')
+    output = versa_shell_command(console, 'ip -o -4 addr show dev eth0 scope global')
+    addresses = []
+    for value in re.findall(r'\binet\s+(\d+\.\d+\.\d+\.\d+)/\d+', output):
+        address = IPv4Address(value)
+        if not (address.is_unspecified or address.is_loopback or address.is_multicast or address.is_link_local):
+            addresses.append(str(address))
+    if not addresses:
+        raise DiscoveryError('No usable IPv4 address on Versa management interface eth0')
+    return hostname, list(dict.fromkeys(addresses))
+
+
 def palo_identity(output):
     values = dict(re.findall(r'^\s*(hostname|ip-address):\s*(\S+)\s*$', output, re.M))
     if not values.get('hostname') or not values.get('ip-address'):
@@ -75,7 +131,7 @@ def discover(client, topology, root, server, timeout=60):
             stage = 'checking node settings'
             try:
                 template = node.get('template')
-                if template not in ('c8000v', 'paloalto', 'panorama'):
+                if template not in ('c8000v', 'paloalto', 'panorama') and template not in VERSA_PREFIXES:
                     raise DiscoveryError('Unsupported console discovery template')
                 if str(node.get('status')) != '2':
                     raise DiscoveryError('Node is not running')
@@ -83,14 +139,18 @@ def discover(client, topology, root, server, timeout=60):
                 if node.get('console') != 'telnet' or url.scheme != 'telnet' or not url.port:
                     raise DiscoveryError('Working Telnet console required')
                 stage = 'loading device credentials'
-                auth = credentials(root, prefix='CISCO' if template == 'c8000v' else 'PALO')
+                auth = credentials(root, prefix=VERSA_PREFIXES.get(template) or
+                                   ('CISCO' if template == 'c8000v' else 'PALO'))
                 stage = 'opening Telnet console'
                 channel = ssh.get_transport().open_session(timeout=10)
                 channel.get_pty(term='vt100', width=512, height=1000)
                 channel.exec_command('telnet 127.0.0.1 ' + str(url.port))
-                console = (Console if template == 'c8000v' else PaloConsole)(channel, boot_timeout=timeout)
+                console = (PaloConsole if template in ('paloalto', 'panorama') else Console)(channel, boot_timeout=timeout)
                 stage = 'logging into console'
-                login(console, template, auth)
+                if template in VERSA_PREFIXES:
+                    versa_login(console, auth)
+                else:
+                    login(console, template, auth)
                 stage = 'reading hostname and management IP'
                 if template == 'c8000v':
                     connected = {interface_key(port['name']) for port in interfaces(client, path, node).values()
@@ -102,6 +162,12 @@ def discover(client, topology, root, server, timeout=60):
                                  and item['status'] == 'up' and item['protocol'] == 'up']
                     if not addresses:
                         raise DiscoveryError('No active IPv4 address on a pnet1-connected interface')
+                elif template in VERSA_PREFIXES:
+                    management_port = 'eth-0/0' if template in ('versafvnf', 'versavnf') else 'eth0'
+                    if not any(port['name'] == management_port and str(port.get('network_id')) in management
+                               for port in interfaces(client, path, node).values()):
+                        raise DiscoveryError('Versa management interface is not connected to pnet1')
+                    hostname, addresses = versa_identity(console)
                 else:
                     console.command('set cli pager off')
                     hostname, address = palo_identity(console.command('show system info'))

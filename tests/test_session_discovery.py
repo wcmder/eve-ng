@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from eve_lab.session_discovery import discover, login, palo_identity
+from eve_lab.session_discovery import discover, login, palo_identity, versa_login, versa_identity
 
 
 class DiscoveryTests(unittest.TestCase):
@@ -39,6 +39,51 @@ class DiscoveryTests(unittest.TestCase):
         login(console, 'c8000v', ['admin', 'password', 'secret'])
         self.assertEqual(console.prompt, 'router#')
         self.assertEqual([c.args[0] for c in console.send.call_args_list], ['', 'admin', 'password', 'enable', 'secret'])
+
+    def test_versa_login_from_login_and_cli(self):
+        console = self.console(['versa login:', 'Password:', 'admin@versa>', '[admin@versa: ~] $'])
+        versa_login(console, ['admin', 'password'])
+        self.assertEqual([c.args[0] for c in console.send.call_args_list],
+                         ['', 'admin', 'password', 'exit'])
+
+    def test_versa_discovery_never_answers_setup_or_password_change(self):
+        for prompt in ['New password:', '(current) UNIX password:',
+                       'Do you want to enter setup? (y/n)', 'Login incorrect',
+                       'admin@versa(config)%', '[other@versa: ~] $']:
+            with self.subTest(prompt=prompt):
+                console = self.console([prompt])
+                with self.assertRaises(RuntimeError):
+                    versa_login(console, ['admin', 'password'])
+                console.send.assert_called_once_with('')
+
+    def test_versa_identity_reads_only_management_ipv4(self):
+        console = self.console([
+            'hostname\nversa-director\n[Administrator@versa-director: ~] $',
+            'ip -o -4 addr show dev eth0 scope global\n'
+            '2: eth0    inet 192.0.2.10/24 brd 192.0.2.255 scope global eth0\n'
+            '[Administrator@versa-director: ~] $'])
+        self.assertEqual(versa_identity(console), ('versa-director', ['192.0.2.10']))
+
+    @patch('eve_lab.session_discovery.paramiko.SSHClient')
+    @patch('eve_lab.session_discovery.credentials', return_value=['admin', 'password'])
+    @patch('eve_lab.session_discovery.versa_login')
+    @patch('eve_lab.session_discovery.versa_identity', return_value=('versa', ['192.0.2.10']))
+    def test_all_versa_templates_discover_with_matching_credentials(self, identity, auth, creds, ssh):
+        for template, prefix, port in [('versafvnf', 'VERSA', 'eth-0/0'),
+                                       ('versavnf', 'VERSA', 'eth-0/0'),
+                                       ('versadir', 'VERSA_DIRECTOR', 'eth0'),
+                                       ('versaana', 'VERSA_ANALYTICS', 'eth0')]:
+            client = MagicMock()
+            client.request.side_effect = [
+                {'1': {'name': 'node', 'template': template, 'status': 2,
+                       'console': 'telnet', 'url': 'telnet://host:32769'}},
+                {'7': {'name': 'mgmt', 'type': 'pnet1'}},
+                {'ethernet': {'0': {'name': port, 'network_id': 7}}}]
+            result = discover(client, {'name': 'lab'}, Path('.'),
+                              {'url': 'http://host', 'ssh_username': 'root', 'ssh_password': 'secret'})
+            self.assertEqual(result['skipped'], [])
+            self.assertEqual(result['leases'][0]['ip_address'], '192.0.2.10')
+            creds.assert_called_with(Path('.'), prefix=prefix)
 
     @patch('eve_lab.session_discovery.paramiko.SSHClient')
     @patch('eve_lab.session_discovery.credentials', return_value=['admin', 'password', 'secret'])

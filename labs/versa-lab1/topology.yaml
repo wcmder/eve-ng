@@ -131,7 +131,7 @@ links:
     network: headend-switch
 
   - node: versa-controller
-    interface: vni-0/0
+    interface: vni-0/1
     network: control-switch
 
   - node: versa-director
@@ -143,7 +143,7 @@ links:
     network: control-switch
 
   - node: versa-controller
-    interface: vni-0/1
+    interface: vni-0/0
     network: headend-switch
 
   - name: internet-versa-a

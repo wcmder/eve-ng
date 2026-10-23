@@ -940,13 +940,17 @@ eve securecrt palo-lab1 --username admin --timeout 120
 ```
 
 This mode reads the live node list and native Telnet console URLs from the EVE
-API, then accesses each console through EVE host SSH. It uses `CISCO_*` and
-`PALO_*` credentials from `.env` for device login; it does not read DHCP leases
+API, then accesses each console through EVE host SSH. It uses `CISCO_*`, `PALO_*`, `VERSA_*`, `VERSA_DIRECTOR_*`, and
+`VERSA_ANALYTICS_*` credentials from `.env` for device login; it does not read DHCP leases
 or use `*_MANAGEMENT_IP` variables as session targets.
 
 - Cisco c8000v: reads `show ip interface brief`, selects assigned, up/up IPv4
   interfaces connected to a remote `pnet1` network, and reads the hostname from
   the privileged CLI prompt.
+- Versa FlexVNF/Controller, Director, and Analytics: reads `hostname` and IPv4
+  addresses on Linux `eth0` through the shell, after checking its EVE management
+  port is connected to `pnet1`. Uses `*_PASSWORD` (the initialized password),
+  not `*_CURRENT_PASSWORD`. Exits operational CLI to the shell when necessary.
 - Palo firewalls and Panorama: reads the hostname and management IPv4 address
   from `show system info`.
 
