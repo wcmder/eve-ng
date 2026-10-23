@@ -87,10 +87,15 @@ networks:
   - name: mgmt
     type: pnet1
 
-  - name: headend-switch
+  - name: control-switch
     type: bridge
     left: 700
     top: 275
+
+  - name: headend-switch
+    type: bridge
+    left: 450
+    top: 350
 
 links:
   - node: cisco-internet
@@ -127,14 +132,18 @@ links:
 
   - node: versa-controller
     interface: vni-0/0
-    network: headend-switch
+    network: control-switch
 
   - node: versa-director
     interface: eth1
-    network: headend-switch
+    network: control-switch
 
   - node: versa-analytics
     interface: eth1
+    network: control-switch
+
+  - node: versa-controller
+    interface: vni-0/1
     network: headend-switch
 
   - name: internet-versa-a
