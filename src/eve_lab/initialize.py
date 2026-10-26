@@ -10,7 +10,7 @@ import paramiko
 
 from .config import load_server
 from .deploy import lab_path, named
-from .device_console import Console, credentials
+from .device_console import Console, credentials, current_password
 from .palo_ssh import management_targets, connect_palo
 from .versa_console import (VERSA_PREFIXES, VersaConsole, VersaHeadendConsole,
                             versa_credentials, validate_commands as validate_versa_commands)
@@ -43,11 +43,38 @@ class PaloConsole(Console):
             raise RuntimeError('Palo Alto rejected a command; inspect console (output omitted)')
         return output
 
+    def set_password(self, username, password):
+        if not re.fullmatch(r'[A-Za-z0-9_.-]+', username or ''):
+            raise ValueError('Invalid PALO_USERNAME')
+        if not password or any(ord(c) < 32 or ord(c) == 127 for c in password):
+            raise ValueError('Invalid PALO_PASSWORD')
+        self.send('set mgt-config users ' + username + ' password')
+        pattern = (r'(?im:^(?:enter |new |confirm |retype )*password\s*:\s*$|'
+                   r'^.*(?:error|invalid|mismatch|failed).*$)|^[\w.@()/:\-]+#\s*$')
+        seen = set()
+        for _ in range(3):
+            _, match = self.expect(pattern, timeout=self.boot_timeout)
+            prompt = match.group().strip().lower()
+            if prompt.endswith('#'):
+                if seen != {'new', 'confirm'}:
+                    raise RuntimeError('Palo password change was not confirmed (secrets omitted)')
+                return
+            if re.search('error|invalid|mismatch|failed', prompt):
+                raise RuntimeError('Palo rejected password change (secrets omitted)')
+            stage = 'confirm' if 'confirm' in prompt or 'retype' in prompt else 'new'
+            if stage in seen:
+                raise RuntimeError('Palo repeated password prompt (secrets omitted)')
+            seen.add(stage)
+            self.send(password)
+        raise RuntimeError('Palo password change did not complete (secrets omitted)')
+
     def initialize(self, commands, username=None, password=None):
         self.command('set cli pager off')
         self.command('configure')
         for command in commands:
             self.command(command)
+        if getattr(self, 'change_password', False) and not getattr(self, 'password_changed', False):
+            self.set_password(username, password)
         output = self.command('commit', timeout=self.boot_timeout)
         if not re.search(r'Configuration committed successfully|There are no changes to commit', output, re.I):
             raise RuntimeError('Palo Alto commit not confirmed; inspect candidate config and commit jobs')
@@ -57,17 +84,13 @@ class PaloConsole(Console):
 class PaloSerialConsole(PaloConsole):
     """PAN-OS serial login, including automatic first-login password setup."""
 
-    def login(self, username, password, auto_factory=True):
-        if not auto_factory:
-            return super().login(username, password)
-        if username == 'admin' and password == 'admin':
-            raise ValueError('Set a nondefault PALO_PASSWORD for Palo Alto initialization')
+    def login(self, username, password, current_password=None):
         if not password or any(ord(c) < 32 or ord(c) == 127 for c in password):
             raise ValueError('Invalid PALO_PASSWORD')
         self.send('')
         stages = set()
-        login_password = password
-        used_factory = False
+        login_password = current_password or password
+        self.password_changed = False
         stale_failures = 0
         pattern = (r'(?im:^[^\n]*login:\s*$|^username:\s*$|^password:\s*$|'
                    r'^(?:enter )?(?:old|new|confirm|retype)[^\n]*password[^\n]*$|'
@@ -84,17 +107,11 @@ class PaloSerialConsole(PaloConsole):
                     stages.clear()
                     print('Discarding an earlier console login failure; waiting for a fresh login prompt...', file=sys.stderr, flush=True)
                     continue
-                if username == 'admin' and not used_factory and 'password' in stages and not {'old', 'new', 'confirm'} & stages:
-                    login_password = 'admin'
-                    used_factory = True
-                    stages.clear()
-                    print('Configured Palo Alto credentials rejected; trying factory credentials once...', file=sys.stderr, flush=True)
-                    continue
-                attempted = 'configured and factory credentials' if used_factory else 'configured credentials'
-                raise RuntimeError('Palo Alto rejected ' + attempted + '; check the console for boot readiness, account lockout, or a different current password')
+                raise RuntimeError('Palo Alto rejected configured credentials; check PALO_CURRENT_PASSWORD (or PALO_PASSWORD when blank); no fallback attempted')
             if prompt.endswith(('>', '#')):
-                if (used_factory or {'old', 'new', 'confirm'} & stages) and not {'new', 'confirm'} <= stages:
+                if ({'old', 'new', 'confirm'} & stages) and not {'new', 'confirm'} <= stages:
                     raise RuntimeError('Palo Alto did not confirm the mandatory password change; no init commands applied')
+                self.password_changed = {'new', 'confirm'} <= stages
                 if prompt.endswith('#'):
                     self.command('exit')
                 return
@@ -112,7 +129,7 @@ class PaloSerialConsole(PaloConsole):
                 raise RuntimeError('Palo Alto repeated a login/password-change prompt; inspect password policy and boot readiness (secrets omitted)')
             stages.add(stage)
             if stage == 'password':
-                print('Submitting ' + ('factory' if used_factory else 'configured') + ' Palo Alto credentials...', file=sys.stderr, flush=True)
+                print('Submitting configured Palo Alto credentials...', file=sys.stderr, flush=True)
             elif stage in ('old', 'new', 'confirm'):
                 print('Answering Palo Alto ' + stage + '-password prompt (value hidden)...', file=sys.stderr, flush=True)
             self.send(value)
@@ -242,6 +259,9 @@ def initialize(client, topology, root, server_name, node_name=None, check=False,
     logins = {template: (versa_credentials(root, template) if template in VERSA_PREFIXES else
                         credentials(root, prefix='PALO' if template in ('paloalto', 'panorama') else 'CISCO'))
               for _, template, _, _ in pending}
+    existing_passwords = {template: (login[2] if template in VERSA_PREFIXES else
+                          current_password(root, 'CISCO' if template == 'c8000v' else 'PALO', login[1]))
+                          for template, login in logins.items()}
     ssh = paramiko.SSHClient()
     try:
         ssh.load_system_host_keys()
@@ -255,8 +275,9 @@ def initialize(client, topology, root, server_name, node_name=None, check=False,
             print(f'Waiting for {name} console (up to {timeout}s per prompt)...', file=sys.stderr, flush=True)
             try:
                 login = logins[template]
+                existing = existing_passwords[template]
                 if template in ('paloalto', 'panorama') and targets.get(name):
-                    device, channel = connect_palo(ssh, targets[name], login[0], login[1], timeout)
+                    device, channel = connect_palo(ssh, targets[name], login[0], existing, timeout)
                 else:
                     channel = ssh.get_transport().open_session(timeout=10)
                     channel.get_pty(term='vt100', width=512, height=1000)
@@ -270,9 +291,16 @@ def initialize(client, topology, root, server_name, node_name=None, check=False,
                 if template == 'versadir':
                     console.sudo_password = True
                 if template == 'panorama' or (template == 'paloalto' and not targets.get(name)):
-                    console.login(*login, auto_factory=not bool(targets.get(name)))
-                else:
+                    if targets.get(name):
+                        PaloConsole.login(console, login[0], existing)
+                    else:
+                        console.login(*login, current_password=existing)
+                elif template in VERSA_PREFIXES:
                     console.login(*login)
+                else:
+                    console.login(login[0], existing, *login[2:])
+                if template in ('paloalto', 'panorama'):
+                    console.change_password = existing != login[1]
                 print('Applying init to ' + name + '...', file=sys.stderr, flush=True)
                 console.initialize(commands, username=login[0], password=login[1])
                 result['completed'].append(name)

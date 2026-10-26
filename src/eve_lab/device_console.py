@@ -62,13 +62,17 @@ class Console:
         self.send('')
         wake = True
         secret_prompts = set()
+        login_prompts = set()
         pattern = (r'(?i:Enter enable secret|Confirm enable secret)\s*:\s*$|'
                    r'Enter your selection\s*\[2\]\s*:\s*$|'
+                   r'(?i:.*(?:authentication failed|login invalid|login incorrect).*)$|'
                    r'Username:\s*$|Password:\s*$|Would you like to enter[^\n]*[?:]\s*$|'
                    r'Press RETURN to get started[^\n]*$|^[\w.()/:-]+[>#]\s*$')
         for _ in range(12):
             _, match = self.expect(pattern, timeout=self.boot_timeout, wake=wake)
             prompt = match.group().strip()
+            if re.search(r'authentication failed|login invalid|login incorrect', prompt, re.I):
+                raise RuntimeError('Cisco rejected configured credentials; check CISCO_CURRENT_PASSWORD and CISCO_ENABLE_SECRET')
             if re.match(r'(Enter|Confirm) enable secret', prompt, re.I):
                 stage = prompt.split()[0].lower()
                 if stage in secret_prompts:
@@ -85,9 +89,15 @@ class Console:
                 wake = False
                 self.send('2')  # Save the initial secret to NVRAM and exit setup.
             elif prompt.startswith('Username:'):
+                if 'username' in login_prompts:
+                    raise RuntimeError('Cisco repeated login prompt; credentials not retried')
+                login_prompts.add('username')
                 self.send(username)
                 wake = False
             elif prompt.startswith('Password:'):
+                if 'password' in login_prompts:
+                    raise RuntimeError('Cisco repeated password prompt; credentials not retried')
+                login_prompts.add('password')
                 self.send(password)
                 wake = False
             elif prompt.startswith('Would you like'):
@@ -183,6 +193,14 @@ def environment_values(root):
     return values
 
 
+def current_password(root, prefix, desired):
+    """Select an explicit existing password for init; never guess factory values."""
+    value = environment_values(root).get(prefix + '_CURRENT_PASSWORD') or desired
+    if not value or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ValueError(prefix + '_CURRENT_PASSWORD must not contain control characters')
+    return value
+
+
 def credentials(root, prefix='CISCO'):
     values = environment_values(root)
     names = (prefix + '_USERNAME', prefix + '_PASSWORD')
@@ -233,7 +251,8 @@ def main(argv=None):
         channel.get_pty(term='vt100', width=512, height=1000)
         channel.exec_command('telnet 127.0.0.1 ' + str(args.port))
         console = Console(channel)
-        console.login(*login)
+        console.login(login[0], current_password(args.root, 'CISCO', login[1])
+                      if args.action == 'init' else login[1], login[2])
         if args.action == 'init':
             console.initialize(commands, username=login[0], password=login[1])
             print('Configuration applied and write memory completed for ' + args.node)

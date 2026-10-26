@@ -4,7 +4,7 @@ import re
 import shlex
 import sys
 
-from .device_console import Console, credentials, environment_values
+from .device_console import Console, credentials, current_password
 
 
 VERSA_PREFIXES = {
@@ -27,7 +27,7 @@ OPTIONAL_SETUP = r'(?i:^\s*do you want to enter setup\s*\?\s*(?:\((?:yes/no|y/n)
 def versa_credentials(root, template):
     prefix = VERSA_PREFIXES[template]
     username, password = credentials(root, prefix)
-    current = environment_values(root).get(prefix + '_CURRENT_PASSWORD') or password
+    current = current_password(root, prefix, password)
     if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.-]*', username):
         raise ValueError('Invalid ' + prefix + '_USERNAME')
     for value in (password, current):

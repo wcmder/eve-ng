@@ -61,11 +61,13 @@ class InitTests(unittest.TestCase):
     @patch('eve_lab.initialize.credentials', return_value=['admin', 'testpass', 'testenable'])
     @patch('eve_lab.initialize.load_server', return_value={'url': 'http://10.0.4.4', 'ssh_username': 'root', 'ssh_password': 'test'})
     def test_execution_uses_api_port_and_credentials(self, server, creds, ssh, console):
+        (self.root / '.env').write_text('CISCO_CURRENT_PASSWORD=existing-secret\n')
         console.return_value.interface_status.return_value = [{'interface': 'GigabitEthernet8', 'ip_address': '172.16.1.20'}]
         result = self.run_init(timeout=900)
         channel = ssh.return_value.get_transport.return_value.open_session.return_value
         channel.exec_command.assert_called_once_with('telnet 127.0.0.1 32775')
         console.assert_called_once_with(channel, boot_timeout=900)
+        console.return_value.login.assert_called_once_with('admin', 'existing-secret', 'testenable')
         console.return_value.initialize.assert_called_once_with(['hostname R0'], username='admin', password='testpass')
         self.assertEqual(result['completed'], ['R0'])
         self.assertEqual(result['interface_status']['R0'][0]['ip_address'], '172.16.1.20')

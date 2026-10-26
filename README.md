@@ -355,11 +355,20 @@ performed by `--check`.
   Hostname, SSH/HTTPS, management IP, netmask, gateway, and DNS settings come
   from the per-node `.cfg`. Credentials come from `.env`.
 
-For both PAN-OS templates, serial login tries configured credentials first and,
-on an explicit authentication failure for `admin`, tries factory credentials
-once and handles the mandatory password change. SSH requires the configured
-credentials and already-working management access. Avoid unrelated pending
-candidate changes, since commit applies the candidate configuration.
+For Cisco, Palo/Panorama, and Versa, `*_CURRENT_PASSWORD` selects the existing
+password used by init; when blank or absent, init uses `*_PASSWORD`. The latter
+is the desired password to apply. Set the current password explicitly for a new
+image; no factory-password fallback is attempted. After a successful change,
+clear `*_CURRENT_PASSWORD` before the next login. An already authenticated console
+can skip login, so a successful rerun does not verify the old password.
+Backup, restore, and SecureCRT discovery continue to use `*_PASSWORD`.
+
+PAN-OS serial init handles mandatory first-login password prompts. When an
+explicit current password differs from the desired password on an initialized
+Palo device, init changes the account password interactively and commits it with
+the init configuration. SSH uses the selected current password and requires
+working management access. Avoid unrelated pending candidate changes, since
+commit applies the candidate configuration.
 
 Initialization merges commands into the running device and can be invoked again;
 it does not wipe or reboot nodes. Interactive commands and multiline constructs
@@ -655,21 +664,18 @@ eve init palo-lab1 --node pano --check
 eve init palo-lab1 --node pano --timeout 1800
 ```
 
-Palo firewall and Panorama serial initialization automatically handle first-time setup. It tries
-the configured credentials first; if authentication explicitly fails for `admin`,
-it tries `admin/admin` once and handles the mandatory old/new/confirm password
-prompts using `PALO_PASSWORD`. An already-initialized device uses the configured
-credentials without a factory-password attempt. It does not reset the node. The command waits
-for prompts and applies the init file,
-and commits. Hostname and SSH/HTTPS settings come from the init file. Success requires confirmation of the
-commit; a failure may leave a changed password or candidate configuration.
-Repeated password-change prompts fail without logging secrets. If initialization
-fails after changing the password, the same command can be rerun using `.env` credentials.
+Palo firewall and Panorama serial initialization use `PALO_CURRENT_PASSWORD`
+when set, otherwise `PALO_PASSWORD`. For a new image, put its existing password
+in `PALO_CURRENT_PASSWORD` and your desired password in `PALO_PASSWORD`.
+There is no automatic factory-password retry. Mandatory old/new/confirm prompts
+are answered using those values. Init then applies the file and verifies commit.
+Hostname and SSH/HTTPS settings come from the init file. Failures can leave a
+changed password or candidate configuration; inspect the device before retrying.
+After a successful password change, clear `PALO_CURRENT_PASSWORD`.
 
 For subsequent configuration changes, use `eve init palo-lab1 --node pano`, or
 use `--management-ip <address>` / the lab's `init.yaml` to connect over SSH.
-SSH uses only the configured credentials and keeps device host-key verification;
-automatic factory-password handling is limited to the serial console.
+SSH uses the same current-password selection and retains host-key verification.
 `--check` validates local
 files and advertised console settings without logging in to the device.
 ### Cisco initialization credentials and configuration
@@ -678,7 +684,8 @@ files and advertised console settings without logging in to the device.
 
 ```dotenv
 CISCO_USERNAME=admin
-CISCO_PASSWORD=<device-password>
+CISCO_PASSWORD=<desired-device-password>
+CISCO_CURRENT_PASSWORD=<existing-password-or-blank>
 CISCO_ENABLE_SECRET=<enable-password>
 ```
 

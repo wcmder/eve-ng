@@ -46,11 +46,11 @@ class PanoramaInitTests(unittest.TestCase):
         return console
 
     def test_factory_password_change_sequence(self):
-        console = self.console(iter(['Panorama login:', 'Password:', 'Login incorrect', 'Panorama login:', 'Password:', 'Enter old password :',
+        console = self.console(iter(['Panorama login:', 'Password:', 'Enter old password :',
                                      'Enter new password :', 'Confirm password :', 'admin@Panorama>']))
-        console.login('admin', 'new-secret')
+        console.login('admin', 'new-secret', current_password='existing-secret')
         self.assertEqual([c.args[0] for c in console.send.call_args_list],
-                         ['', 'admin', 'new-secret', 'admin', 'admin', 'admin', 'new-secret', 'new-secret'])
+                         ['', 'admin', 'existing-secret', 'existing-secret', 'new-secret', 'new-secret'])
 
     def test_rejected_password_is_not_retried_or_exposed(self):
         console = self.console(iter(['login:', 'Password:', 'New password:', 'New password:']))
@@ -64,13 +64,13 @@ class PanoramaInitTests(unittest.TestCase):
         self.assertEqual([c.args[0] for c in console.send.call_args_list],
                          ['', 'admin', 'new-secret'])
 
-    def test_factory_fallback_is_attempted_only_once(self):
+    def test_failed_login_has_no_factory_or_target_fallback(self):
         console = self.console(iter(['login:', 'Password:', 'Login incorrect',
                                      'login:', 'Password:', 'Login incorrect']))
-        with self.assertRaisesRegex(RuntimeError, 'configured and factory credentials'):
-            console.login('admin', 'new-secret')
+        with self.assertRaisesRegex(RuntimeError, 'no fallback attempted'):
+            console.login('admin', 'new-secret', current_password='existing-secret')
         self.assertEqual([c.args[0] for c in console.send.call_args_list],
-                         ['', 'admin', 'new-secret', 'admin', 'admin'])
+                         ['', 'admin', 'existing-secret'])
 
     def test_abandoned_login_failure_before_our_credentials_is_ignored_once(self):
         console = self.console(iter(['Login incorrect', 'Panorama login:', 'Password:', 'admin@pano>']))
@@ -78,10 +78,21 @@ class PanoramaInitTests(unittest.TestCase):
         self.assertEqual([c.args[0] for c in console.send.call_args_list],
                          ['', 'admin', 'new-secret'])
 
-    def test_factory_fallback_requires_password_change(self):
-        console = self.console(iter(['login:', 'Password:', 'Login incorrect', 'login:', 'Password:', 'admin@Panorama>']))
-        with self.assertRaisesRegex(RuntimeError, 'did not confirm'):
-            console.login('admin', 'new-secret')
+    def test_explicit_current_password_can_login_without_forced_change(self):
+        console = self.console(iter(['login:', 'Password:', 'admin@Panorama>']))
+        console.login('admin', 'new-secret', current_password='existing-secret')
+        self.assertFalse(console.password_changed)
+        self.assertEqual([c.args[0] for c in console.send.call_args_list],
+                         ['', 'admin', 'existing-secret'])
+
+    def test_password_rotation_interactive_and_rejection(self):
+        console = self.console(iter(['Enter password :', 'Confirm password :', 'admin@pano#']))
+        console.set_password('admin', 'new-secret')
+        self.assertEqual([c.args[0] for c in console.send.call_args_list],
+                         ['set mgt-config users admin password', 'new-secret', 'new-secret'])
+        console = self.console(iter(['Enter password :', 'Enter password :']))
+        with self.assertRaisesRegex(RuntimeError, 'repeated'):
+            console.set_password('admin', 'new-secret')
 
     @patch('eve_lab.initialize.paramiko.SSHClient')
     def test_preview_and_factory_preflight(self, ssh):
@@ -119,13 +130,15 @@ class PanoramaInitTests(unittest.TestCase):
     @patch('eve_lab.initialize.credentials', return_value=['admin', 'new-secret'])
     @patch('eve_lab.initialize.load_server', return_value={'url': 'http://10.0.4.4', 'ssh_username': 'root', 'ssh_password': 'test'})
     def test_firewall_serial_init_uses_first_login_and_its_config(self, server, creds, ssh, console):
+        (self.root / '.env').write_text('PALO_CURRENT_PASSWORD=existing-secret\n')
         self.node['template'] = 'paloalto'
         commands = ['set deviceconfig system hostname pa-a',
                     'set deviceconfig system type dhcp-client']
         self.config.write_text('\n'.join(commands))
         result = self.init()
         self.assertEqual(result['completed'], ['pano'])
-        console.return_value.login.assert_called_once_with('admin', 'new-secret', auto_factory=True)
+        console.return_value.login.assert_called_once_with('admin', 'new-secret', current_password='existing-secret')
+        self.assertTrue(console.return_value.change_password)
         console.return_value.initialize.assert_called_once_with(commands, username='admin', password='new-secret')
         channel = ssh.return_value.get_transport.return_value.open_session.return_value
         channel.exec_command.assert_called_once_with('telnet 127.0.0.1 32772')
@@ -143,12 +156,38 @@ class PanoramaInitTests(unittest.TestCase):
         self.config.write_text('\n'.join(configured))
         result = self.init()
         self.assertEqual(result['completed'], ['pano'])
-        console.return_value.login.assert_called_once_with('admin', 'new-secret', auto_factory=True)
+        console.return_value.login.assert_called_once_with('admin', 'new-secret', current_password='new-secret')
         commands = console.return_value.initialize.call_args.args[0]
         self.assertEqual(commands, configured)
         channel = ssh.return_value.get_transport.return_value.open_session.return_value
         channel.exec_command.assert_called_once_with('telnet 127.0.0.1 32772')
         channel.close.assert_called_once()
+
+    def test_rotation_is_committed_and_first_login_change_is_not_repeated(self):
+        for changed in (False, True):
+            console = PanoramaConsole(MagicMock())
+            console.change_password = True
+            console.password_changed = changed
+            console.set_password = MagicMock()
+            console.command = MagicMock(return_value='Configuration committed successfully')
+            console.initialize([NETWORK.strip()], username='admin', password='new-secret')
+            if changed:
+                console.set_password.assert_not_called()
+            else:
+                console.set_password.assert_called_once_with('admin', 'new-secret')
+            self.assertIn('commit', [c.args[0] for c in console.command.call_args_list])
+
+    def test_current_password_selection_and_environment_override(self):
+        from eve_lab.device_console import current_password
+        (self.root / '.env').write_text('PALO_CURRENT_PASSWORD=existing\n')
+        with patch.dict('os.environ', {}, clear=True):
+            self.assertEqual(current_password(self.root, 'PALO', 'desired'), 'existing')
+            self.assertEqual(current_password(self.root, 'CISCO', 'desired'), 'desired')
+        with patch.dict('os.environ', {'PALO_CURRENT_PASSWORD': ''}, clear=True):
+            self.assertEqual(current_password(self.root, 'PALO', 'desired'), 'desired')
+        with patch.dict('os.environ', {'PALO_CURRENT_PASSWORD': 'bad\nvalue'}, clear=True):
+            with self.assertRaises(ValueError):
+                current_password(self.root, 'PALO', 'desired')
 
     def test_commit_must_be_confirmed(self):
         console = PanoramaConsole(MagicMock())
