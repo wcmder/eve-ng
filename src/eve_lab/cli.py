@@ -14,6 +14,7 @@ from .console_backup import backup
 from .device_restore import restore
 from .initialize import initialize, prepare_panorama_console
 from .bootstrap import prepare as prepare_bootstrap
+from .host_init import initialize_host
 from .config import load_server
 from .nat import configure as configure_nat
 from .securecrt import generate as generate_securecrt
@@ -65,12 +66,13 @@ def main():
         command = commands.add_parser(name)
         command.add_argument("--server", default="default")
         if name in ("plan", "apply", "start", "stop", "delete", "backup", "restore", "init", "bootstrap"):
-            command.add_argument("lab")
+            command.add_argument("lab", nargs="?" if name == "init" else None)
         if name == "bootstrap":
             command.add_argument("--node", required=True, help="Palo Alto 11.2 node to prepare for a bootstrap test")
             command.add_argument("--check", action="store_true", help="Read node state and validate bootstrap attachment prerequisites")
             command.add_argument("--attach", action="store_true", help="Attach prepared media to the stopped node; never wipes or starts it")
         if name == "init":
+            command.add_argument("--host", choices=["web", "ssh", "all"], help="Change EVE account passwords instead of initializing lab devices")
             command.add_argument("--node", help="Initialize only this remote node")
             command.add_argument("--management-ip", help="Palo/Panorama management IPv4 address; requires --node (overrides lab init.yaml)")
             command.add_argument("--prepare-console", action="store_true", help="Switch one stopped Panorama or Palo Alto firewall node to Telnet serial console; does not start or initialize it")
@@ -105,6 +107,16 @@ def main():
             command.add_argument("name")
     args = parser.parse_args()
     try:
+        if args.command == 'init' and args.host:
+            if args.lab or args.node or args.management_ip or args.prepare_console:
+                raise ValueError('--host cannot be combined with a lab or device-init options')
+            result = initialize_host(args.root, args.server, args.host, args.check)
+            print(json.dumps(result, indent=2))
+            if result['failed']:
+                sys.exit(1)
+            return
+        if args.command == 'init' and not args.lab:
+            raise ValueError('init requires a lab or --host web|ssh|all')
         server = load_server(args.root, args.server, auth="ssh" if args.command in ("dhcp", "securecrt", "nat") else "web")
         if args.command == "nat":
             print(json.dumps(configure_nat(server, args.nat_action, args.interface, args.dry_run), indent=2))

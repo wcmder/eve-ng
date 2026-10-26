@@ -21,20 +21,29 @@ def login(console, template, auth):
     console.send('')
     seen = set()
     enabling = False
+    stale_enable_prompts = 0
     pattern = (r'(?im:^[^\n]*login:\s*$|^username:\s*$|^password:\s*$|'
-               r'^.*(?:new password|old password|confirm password|enable secret|initial configuration|your selection|login incorrect|authentication failed).*$)|'
+               r'^.*(?:new password|old password|confirm password|enable secret|initial configuration|your selection|login incorrect|authentication failed|access denied|bad secrets).*$)|'
                r'^[\w.@()/:-]+[>#]\s*$')
     for _ in range(8):
         _, match = console.expect(pattern, timeout=console.boot_timeout)
         prompt = match.group().strip()
         lower = prompt.lower()
-        if re.search('new password|old password|confirm password|enable secret|initial configuration|your selection|login incorrect|authentication failed', lower):
+        if re.search('new password|old password|confirm password|enable secret|initial configuration|your selection|login incorrect|authentication failed|access denied|bad secrets', lower):
             raise DiscoveryError('Device needs initialization or rejected configured credentials')
         if prompt.endswith(('>', '#')):
             if '(config' in lower or (template != 'c8000v' and prompt.endswith('#')):
                 raise DiscoveryError('Console is in configuration mode; exit it before discovery')
             if template == 'c8000v' and prompt.endswith('>'):
                 if enabling:
+                    # Telnet attachment plus the initial Enter can produce two
+                    # unprivileged prompts before enable's password prompt.
+                    # Never resend enable or a secret for buffered prompts.
+                    if 'enable' not in seen and stale_enable_prompts < 2:
+                        stale_enable_prompts += 1
+                        continue
+                    if 'enable' not in seen:
+                        raise DiscoveryError('Enable password prompt not received; inspect the console')
                     raise DiscoveryError('Enable authentication failed')
                 enabling = True
                 console.send('enable')

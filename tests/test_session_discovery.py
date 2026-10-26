@@ -40,6 +40,27 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(console.prompt, 'router#')
         self.assertEqual([c.args[0] for c in console.send.call_args_list], ['', 'admin', 'password', 'enable', 'secret'])
 
+    def test_cisco_buffered_prompt_before_enable_password(self):
+        console = self.console(['router>', 'router>', 'Password:', 'router#'])
+        login(console, 'c8000v', ['admin', 'password', 'secret'])
+        self.assertEqual(console.prompt, 'router#')
+        self.assertEqual([c.args[0] for c in console.send.call_args_list],
+                         ['', 'enable', 'secret'])
+
+    def test_cisco_rejection_after_secret_never_retries(self):
+        for last in ('router>', 'Password:', '% Access denied', '% Bad secrets'):
+            console = self.console(['router>', 'Password:', last])
+            with self.assertRaises(RuntimeError):
+                login(console, 'c8000v', ['admin', 'password', 'secret'])
+            self.assertEqual([c.args[0] for c in console.send.call_args_list],
+                             ['', 'enable', 'secret'])
+
+    def test_cisco_repeated_unprivileged_prompts_are_bounded(self):
+        console = self.console(['router>'] * 4)
+        with self.assertRaisesRegex(RuntimeError, 'password prompt not received'):
+            login(console, 'c8000v', ['admin', 'password', 'secret'])
+        self.assertEqual([c.args[0] for c in console.send.call_args_list], ['', 'enable'])
+
     def test_versa_login_from_login_and_cli(self):
         console = self.console(['versa login:', 'Password:', 'admin@versa>', '[admin@versa: ~] $'])
         versa_login(console, ['admin', 'password'])

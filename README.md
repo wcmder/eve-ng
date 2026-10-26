@@ -678,6 +678,53 @@ use `--management-ip <address>` / the lab's `init.yaml` to connect over SSH.
 SSH uses the same current-password selection and retains host-key verification.
 `--check` validates local
 files and advertised console settings without logging in to the device.
+### EVE host account passwords
+
+Use host mode to change the configured EVE web/API account and Linux SSH account:
+
+```dotenv
+EVE_USERNAME=admin
+EVE_CURRENT_PASSWORD=<existing-web-password>
+EVE_PASSWORD=<desired-web-password>
+EVE_SSH_USERNAME=root
+EVE_SSH_CURRENT_PASSWORD=<existing-ssh-password>
+EVE_SSH_PASSWORD=<desired-ssh-password>
+```
+
+```sh
+eve init --host all --check
+eve init --host all
+# Or change one account:
+eve init --host web
+eve init --host ssh
+```
+
+`--server <name>` selects a configured server. Host mode does not accept a lab,
+`--node`, `--management-ip`, or `--prepare-console`. `--check` validates local
+settings only; it does not test authentication or change the host.
+
+The command authenticates selected accounts before changing either password.
+Web updates use the [EVE user API](https://www.eve-ng.net/index.php/how-to-eve-ng-api/)
+and send only the password field, leaving account metadata and POD assignments
+untouched; SSH updates run `passwd` for the logged-in
+Linux account. Passwords are sent through password prompts, not shell arguments.
+Trusted SSH host-key checking remains enabled. Each update is verified using a
+fresh login. The selected web account needs permission to edit its user record.
+No accounts are renamed and no factory passwords are guessed.
+
+After success, clear `EVE_CURRENT_PASSWORD` and `EVE_SSH_CURRENT_PASSWORD`.
+The command does not rewrite those values automatically. Blank current values
+use the desired password, and equal values trigger login verification without a
+password update. Other commands continue to use `EVE_PASSWORD` and
+`EVE_SSH_PASSWORD`. Shell environment variables override `.env`; custom password
+variable names in `servers.yaml` use the corresponding `_CURRENT_PASSWORD` name.
+
+Web and SSH changes are not atomic. The result reports changed and verified
+accounts separately. On failure, a password might already have changed; inspect
+the result and verify access before retrying. Update saved browser/SSH/SecureCRT
+credentials separately. Automated tests cover this mode; live host rotation has
+not yet been verified.
+
 ### Cisco initialization credentials and configuration
 
 `eve init` supports c8000v (IOS XE) and uses your device credentials from `.env`:
